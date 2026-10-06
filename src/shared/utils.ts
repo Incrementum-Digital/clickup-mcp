@@ -92,24 +92,144 @@ export function getSpaceDetails(spaceId: string): Promise<any> {
 }
 
 // Task search index management - cache promises to prevent race conditions
-const taskIndices: Map<string, Promise<Fuse<any>>> = new Map();
+const taskIndices: Map<string, Promise<TaskSearchResult>> = new Map();
+
+/** ClickUp returns at most this many tasks per page of the team task endpoint. */
+export const TASK_PAGE_SIZE = 100;
+/** Pages fetched per search. The rate limit is 100 requests/minute per token, so keep this small. */
+export const TASK_MAX_PAGES = 5;
+/** Pages fetched in parallel by the legacy (pre-filter) search path, unfiltered / scoped by space, list or assignee. */
+export const LEGACY_MAX_PAGES = 30;
+export const LEGACY_SCOPED_MAX_PAGES = 10;
+
+export type TaskOrderBy = 'id' | 'created' | 'updated' | 'due_date';
+
+export interface CustomFieldFilter {
+  field_id: string;
+  operator: string;
+  value?: unknown;
+}
+
+/** Filters understood by ClickUp's "Get Filtered Team Tasks" endpoint. Dates are Unix ms. */
+export interface TaskFilters {
+  space_ids?: string[];
+  list_ids?: string[];
+  /** Folder ids - sent as project_ids[] */
+  folder_ids?: string[];
+  assignees?: string[];
+  statuses?: string[];
+  tags?: string[];
+  include_closed?: boolean;
+  include_subtasks?: boolean;
+  due_date_gt?: number;
+  due_date_lt?: number;
+  date_created_gt?: number;
+  date_created_lt?: number;
+  date_updated_gt?: number;
+  date_updated_lt?: number;
+  date_done_gt?: number;
+  date_done_lt?: number;
+  custom_fields?: CustomFieldFilter[];
+  /** Task id - returns the subtasks of that task */
+  parent?: string;
+  order_by?: TaskOrderBy;
+  reverse?: boolean;
+}
+
+export interface TaskSearchResult {
+  tasks: any[];
+  index: Fuse<any>;
+  pagesFetched: number;
+  /** True when the last allowed page was still full, i.e. more matching tasks probably exist. */
+  pageCapReached: boolean;
+  /** Set when a page after the first failed, so the task list is incomplete. */
+  warning?: string;
+}
 
 /**
- * Get or create a task search index with specified filters
- * Caches promises to prevent race conditions on concurrent calls
+ * Parses an ISO 8601 date or datetime into Unix ms.
+ * Date-only values are UTC; `endOfDay` makes a date-only value mean 23:59:59.999 of that day.
+ * Datetimes without an offset are treated as UTC. Throws on unparsable input.
+ */
+export function parseDateFilter(name: string, value: string, endOfDay = false): number {
+  const v = value.trim();
+  let ms: number;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(v)) {
+    ms = Date.parse(`${v}T${endOfDay ? '23:59:59.999' : '00:00:00.000'}Z`);
+    // Date.parse rolls impossible days over (2026-02-31 -> March 3rd) - reject those
+    if (Number.isFinite(ms) && new Date(ms).toISOString().slice(0, 10) !== v) ms = NaN;
+  } else {
+    const hasZone = /(Z|[+-]\d{2}(:?\d{2})?)$/i.test(v);
+    ms = Date.parse(hasZone ? v : `${v}Z`);
+  }
+  if (!Number.isFinite(ms)) {
+    throw new Error(`Invalid ${name} "${value}": expected an ISO 8601 date (2025-01-31) or datetime (2025-01-31T09:00:00Z).`);
+  }
+  return ms;
+}
+
+/**
+ * Builds the query parameters (without `page`) for the filtered team tasks endpoint.
+ * Array values are sorted so equal filters always produce the same string (used as cache key).
+ */
+export function buildTaskQueryParams(filters: TaskFilters): string[] {
+  const params: string[] = [];
+  const enc = encodeURIComponent;
+  const addArray = (name: string, values?: string[]) => {
+    if (!values?.length) return;
+    [...values].sort().forEach(v => params.push(`${name}[]=${enc(v)}`));
+  };
+  const addValue = (name: string, value: string | number | boolean | undefined) => {
+    if (value === undefined) return;
+    params.push(`${name}=${enc(String(value))}`);
+  };
+
+  addValue('order_by', filters.order_by ?? 'updated');
+  addValue('reverse', filters.reverse);
+  addArray('space_ids', filters.space_ids);
+  addArray('list_ids', filters.list_ids);
+  addArray('project_ids', filters.folder_ids);
+  addArray('assignees', filters.assignees);
+  addArray('statuses', filters.statuses);
+  addArray('tags', filters.tags);
+  if (filters.include_closed) addValue('include_closed', true);
+  if (filters.include_subtasks) addValue('subtasks', true);
+  addValue('due_date_gt', filters.due_date_gt);
+  addValue('due_date_lt', filters.due_date_lt);
+  addValue('date_created_gt', filters.date_created_gt);
+  addValue('date_created_lt', filters.date_created_lt);
+  addValue('date_updated_gt', filters.date_updated_gt);
+  addValue('date_updated_lt', filters.date_updated_lt);
+  addValue('date_done_gt', filters.date_done_gt);
+  addValue('date_done_lt', filters.date_done_lt);
+  if (filters.custom_fields?.length) addValue('custom_fields', JSON.stringify(filters.custom_fields));
+  addValue('parent', filters.parent);
+  return params;
+}
+
+/**
+ * Get or create the task list + search index for the given filters.
+ * Caches promises to prevent race conditions on concurrent calls; rejected fetches are not cached.
+ *
+ * mode "filtered" (default): sequential, capped at TASK_MAX_PAGES pages, stops at a short page.
+ * mode "legacy": the original deep fetch used when only the pre-existing filters
+ * (space_ids, list_ids, assignees) are set - up to LEGACY_MAX_PAGES pages in parallel so a pure
+ * text search can match across thousands of recently updated tasks.
  */
 export async function getTaskSearchIndex(
-  space_ids?: string[],
-  list_ids?: string[],
-  assignees?: string[]
-): Promise<Fuse<any> | null> {
-  // Create cache key from sorted filter arrays
-  const filterKey = JSON.stringify({
-    space_ids: space_ids?.sort(),
-    list_ids: list_ids?.sort(),
-    assignees: assignees?.sort()
-  });
-  const key = `${credentialCacheKey()}:${filterKey}`;
+  filters: TaskFilters = {},
+  mode: 'filtered' | 'legacy' = 'filtered'
+): Promise<TaskSearchResult> {
+  const queryString = (mode === 'legacy'
+    ? buildTaskQueryParams({
+      space_ids: filters.space_ids,
+      list_ids: filters.list_ids,
+      assignees: filters.assignees,
+      include_subtasks: true,
+    })
+    : buildTaskQueryParams(filters)
+  ).join('&');
+  const key = `${credentialCacheKey()}:${mode}:${queryString}`;
 
   // Check for existing valid index promise
   const cachedPromise = taskIndices.get(key);
@@ -118,50 +238,34 @@ export async function getTaskSearchIndex(
   }
 
   // Create the fetch promise
-  const fetchPromise = (async (): Promise<Fuse<any>> => {
-    console.error(`Refreshing task index for filters: ${filterKey}`);
-    const tasks = await fetchTasks(space_ids, list_ids, assignees);
-    const index = createFuseIndex(tasks);
-    console.error(`Task index created with ${tasks.length} tasks`);
-    return index;
+  const fetchPromise = (async (): Promise<TaskSearchResult> => {
+    console.error(`Refreshing ${mode} task index for filters: ${queryString}`);
+    const fetched = mode === 'legacy'
+      ? await fetchTasksLegacy(queryString, !!(filters.space_ids?.length || filters.list_ids?.length || filters.assignees?.length))
+      : await fetchTasks(queryString);
+    const index = createFuseIndex(fetched.tasks);
+    console.error(`Task index created with ${fetched.tasks.length} tasks (${fetched.pagesFetched} page(s))`);
+    return {...fetched, index};
   })();
 
   // Store promise with auto-cleanup
   taskIndices.set(key, fetchPromise);
+  fetchPromise.catch(() => taskIndices.delete(key));
   setTimeout(() => {
     taskIndices.delete(key);
-    console.error(`Auto-cleaned index for filters: ${filterKey}`);
+    console.error(`Auto-cleaned index for filters: ${queryString}`);
   }, GLOBAL_REFRESH_INTERVAL);
 
   return fetchPromise;
 }
 
 /**
- * Fetch tasks using team endpoint with dynamic filters
+ * Original deep fetch: all pages requested in parallel (30 pages unfiltered, 10 when scoped by
+ * space/list/assignee). Failed pages count as empty, as before.
  */
-async function fetchTasks(
-  space_ids?: string[],
-  list_ids?: string[],
-  assignees?: string[]
-): Promise<any[]> {
-  const queryParams = ['order_by=updated', 'subtasks=true'];
-
-  // Add filter parameters
-  if (space_ids?.length) {
-    space_ids.forEach(id => queryParams.push(`space_ids[]=${id}`));
-  }
-  if (list_ids?.length) {
-    list_ids.forEach(id => queryParams.push(`list_ids[]=${id}`));
-  }
-  if (assignees?.length) {
-    assignees.forEach(id => queryParams.push(`assignees[]=${id}`));
-  }
-
-  const queryString = queryParams.join('&');
-
-  // Fetch multiple pages in parallel
-  const maxPages = space_ids?.length || list_ids?.length || assignees?.length ? 10 : 30; // Fewer pages for filtered searches
-  const taskListsPromises = [...Array(maxPages)].map(async (_, i) => {
+async function fetchTasksLegacy(queryString: string, scoped: boolean): Promise<Omit<TaskSearchResult, 'index'>> {
+  const maxPages = scoped ? LEGACY_SCOPED_MAX_PAGES : LEGACY_MAX_PAGES;
+  const taskLists = await Promise.all([...Array(maxPages)].map(async (_, i) => {
     const url = `https://api.clickup.com/api/v2/team/${CONFIG.teamId}/task?${queryString}&page=${i}`;
     try {
       const res = await fetch(url, {headers: {Authorization: CONFIG.authHeader}});
@@ -170,10 +274,49 @@ async function fetchTasks(
       console.error(`Error fetching page ${i}:`, e);
       return {tasks: []};
     }
-  });
+  }));
+  return {
+    tasks: taskLists.flatMap(taskList => taskList.tasks || []),
+    pagesFetched: maxPages,
+    pageCapReached: false,
+  };
+}
 
-  const taskLists = await Promise.all(taskListsPromises);
-  return taskLists.flatMap(taskList => taskList.tasks || []);
+/**
+ * Fetch tasks using the team endpoint, up to TASK_MAX_PAGES pages.
+ * Pages are fetched one after another so a short page stops the loop early.
+ */
+async function fetchTasks(queryString: string): Promise<Omit<TaskSearchResult, 'index'>> {
+  const tasks: any[] = [];
+  let pagesFetched = 0;
+  let pageCapReached = false;
+  let warning: string | undefined;
+
+  for (let page = 0; page < TASK_MAX_PAGES; page++) {
+    const url = `https://api.clickup.com/api/v2/team/${CONFIG.teamId}/task?${queryString}&page=${page}`;
+    let body: any;
+    try {
+      const res = await fetch(url, {headers: {Authorization: CONFIG.authHeader}});
+      body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(`ClickUp API error ${res.status}${body?.err ? `: ${body.err}` : ''}`);
+      }
+    } catch (e) {
+      if (page === 0) throw e;
+      console.error(`Error fetching page ${page}:`, e);
+      warning = `Fetching page ${page + 1} failed (${e instanceof Error ? e.message : String(e)}), so the results are incomplete.`;
+      break;
+    }
+
+    const pageTasks: any[] = body.tasks || [];
+    pagesFetched++;
+    tasks.push(...pageTasks);
+
+    if (pageTasks.length < TASK_PAGE_SIZE || body.last_page === true) break;
+    if (page === TASK_MAX_PAGES - 1) pageCapReached = true;
+  }
+
+  return {tasks, pagesFetched, pageCapReached, warning};
 }
 
 /**
@@ -322,6 +465,17 @@ export function formatSpaceTree(space: any, lists: any[], folders: any[], docume
 
 // Space search index cache - cache promise to prevent race conditions
 const spaceSearchIndexPromises = new Map<string, Promise<Fuse<any> | null>>();
+
+/**
+ * Looks up a space name in the cached space list (one request per user per minute for all spaces).
+ * Returns undefined when the space is not in the list or the list could not be loaded.
+ */
+export async function getSpaceNameFromIndex(spaceId: string): Promise<string | undefined> {
+  const index = await getSpaceSearchIndex();
+  const spaces: any[] = (index as any)?._docs ?? [];
+  const name = spaces.find(space => String(space.id) === String(spaceId))?.name;
+  return typeof name === 'string' && name ? name : undefined;
+}
 
 /**
  * Get or refresh the space search index

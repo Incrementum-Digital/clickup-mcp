@@ -69,7 +69,8 @@ test("searchTasks fetches missing task by id", async (t) => {
 
   const result = await tools.searchTasks({ terms: ["abc123"] });
   assert.ok(directHit, "expected direct task fetch");
-  assert.ok(result.content[0].text.includes("task_id: abc123"));
+  const directText = result.content.map((b: any) => b.text || "").join("\n");
+  assert.ok(directText.includes("task_id: abc123"));
 
   await mockAgent.close();
   t.mock.timers.reset();
@@ -104,7 +105,14 @@ test("searchTasks uses paginated index with filters", async (t) => {
         date_updated: "0",
       };
       return {
+        // A full page (100 tasks) so the next page is requested
         tasks: [
+          ...Array.from({ length: 97 }, (_, i) => ({
+            ...base,
+            id: `filler${i}`,
+            name: `Filler ${i}`,
+            url: `https://app.clickup.com/t/filler${i}`,
+          })),
           {
             ...base,
             id: "t1",

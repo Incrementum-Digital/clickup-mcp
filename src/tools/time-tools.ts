@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { CONFIG } from "../shared/config";
-import { getAllTeamMembers } from "../shared/utils";
+import { generateTaskUrl, getAllTeamMembers } from "../shared/utils";
 
 /**
  * Converts ISO date string to Unix timestamp in milliseconds
@@ -53,6 +53,51 @@ function formatEntryTime(timestamp: number): string {
   const hours = String(date.getHours()).padStart(2, '0');
   const minutes = String(date.getMinutes()).padStart(2, '0');
   return `${date.getFullYear()}-${month}-${day} ${hours}:${minutes}`;
+}
+
+const TIME_ENTRIES_URL = () => `https://api.clickup.com/api/v2/team/${CONFIG.teamId}/time_entries`;
+
+function textResult(text: string) {
+  return { content: [{ type: "text" as const, text }] };
+}
+
+/** Formats milliseconds as h:mm (e.g. 5400000 -> "1:30") */
+function formatHoursMinutes(durationMs: number): string {
+  const totalMinutes = Math.round(durationMs / 60000);
+  return `${Math.floor(totalMinutes / 60)}:${String(totalMinutes % 60).padStart(2, '0')}`;
+}
+
+/** Fetches the authenticated user's running timer entry, or null if none is running */
+async function fetchRunningTimer(): Promise<any | null> {
+  const response = await fetch(`${TIME_ENTRIES_URL()}/current`, {
+    headers: { Authorization: CONFIG.authHeader },
+  });
+  if (!response.ok) {
+    throw new Error(`Error fetching running timer: ${response.status} ${response.statusText}`);
+  }
+  const data: any = await response.json();
+  return data?.data && data.data.id ? data.data : null;
+}
+
+/** Describes a timer entry's task with id and URL */
+function describeEntryTask(entry: any): string[] {
+  const taskId = entry.task?.id;
+  if (!taskId) return ['task: none (timer is not linked to a task)'];
+  return [
+    `task: ${entry.task?.name || 'Unknown'} (task_id: ${taskId})`,
+    `url: ${generateTaskUrl(taskId)}`,
+  ];
+}
+
+function describeRunningEntry(entry: any): string[] {
+  const start = parseInt(entry.start);
+  return [
+    `entry_id: ${entry.id}`,
+    ...describeEntryTask(entry),
+    `elapsed: ${formatDuration(Date.now() - start)}`,
+    `started_at: ${timestampToIso(start)}`,
+    ...(entry.description ? [`description: ${entry.description}`] : []),
+  ];
 }
 
 export function registerTimeToolsRead(server: McpServer) {
@@ -132,6 +177,25 @@ export function registerTimeToolsRead(server: McpServer) {
             },
           ],
         };
+      }
+    }
+  );
+
+  server.tool(
+    "getRunningTimer",
+    "Gets the current user's running (live) timer, if any, including the task and elapsed time.",
+    {},
+    {
+      readOnlyHint: true
+    },
+    async () => {
+      try {
+        const entry = await fetchRunningTimer();
+        if (!entry) return textResult('No timer running.');
+        return textResult(['Timer running:', ...describeRunningEntry(entry)].join('\n'));
+      } catch (error) {
+        console.error('Error fetching running timer:', error);
+        return textResult(`Error fetching running timer: ${error instanceof Error ? error.message : 'Unknown error'}`);
       }
     }
   );
@@ -404,6 +468,143 @@ export function registerTimeToolsWrite(server: McpServer) {
               text: `Error creating time entry: ${error instanceof Error ? error.message : 'Unknown error'}`,
             },
           ],
+        };
+      }
+    }
+  );
+
+  server.tool(
+    "startTimer",
+    [
+      "Starts a live timer for the current user, optionally on a task.",
+      "ClickUp allows only one running timer: if one is already running this refuses and reports it - call stopTimer first.",
+      "IMPORTANT: Check the task's status first - tracking time on 'backlog', 'closed', or similar inactive tasks usually doesn't make sense."
+    ].join("\n"),
+    {
+      task_id: z.string().min(6).max(16).optional().describe("Optional 6-16 character task ID to track time against"),
+      description: z.string().optional().describe("Optional description for the time entry"),
+      billable: z.boolean().optional().describe("Optional flag marking the entry as billable")
+    },
+    {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+    },
+    async ({ task_id, description, billable }) => {
+      try {
+        const running = await fetchRunningTimer();
+        if (running) {
+          return textResult([
+            'A timer is already running, so no new timer was started. Call stopTimer first, then startTimer again.',
+            ...describeRunningEntry(running)
+          ].join('\n'));
+        }
+
+        const requestBody = {
+          ...(task_id && { tid: task_id }),
+          ...(description && { description }),
+          ...(billable !== undefined && { billable })
+        };
+
+        const response = await fetch(`${TIME_ENTRIES_URL()}/start`, {
+          method: 'POST',
+          headers: {
+            Authorization: CONFIG.authHeader,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(requestBody)
+        });
+
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({}));
+          throw new Error(`Error starting timer: ${response.status} ${response.statusText} - ${JSON.stringify(errorData)}`);
+        }
+
+        const timeEntry: any = await response.json();
+        const entry = timeEntry.data || {};
+
+        let taskName: string | undefined = entry.task?.name;
+        if (task_id && !taskName) {
+          try {
+            const taskResponse = await fetch(`https://api.clickup.com/api/v2/task/${task_id}`, {
+              headers: { Authorization: CONFIG.authHeader },
+            });
+            if (taskResponse.ok) {
+              taskName = ((await taskResponse.json()) as any).name;
+            }
+          } catch (error) {
+            console.error('Warning: could not fetch task name for timer:', error);
+          }
+        }
+
+        const start = parseInt(entry.start) || Date.now();
+        return textResult([
+          'Timer started!',
+          `entry_id: ${entry.id || 'N/A'}`,
+          ...(task_id ? [`task: ${taskName || 'Unknown'} (task_id: ${task_id})`, `url: ${generateTaskUrl(task_id)}`] : ['task: none']),
+          `start_time: ${timestampToIso(start)}`,
+          ...(description ? [`description: ${description}`] : []),
+        ].join('\n'));
+      } catch (error) {
+        console.error('Error starting timer:', error);
+        return textResult(`Error starting timer: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      }
+    }
+  );
+
+  server.tool(
+    "stopTimer",
+    "Stops the current user's running timer and reports the finished entry (task, duration, start and end times).",
+    {},
+    {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+    },
+    async () => {
+      try {
+        const running = await fetchRunningTimer();
+        if (!running) {
+          return textResult('No timer running, nothing to stop.');
+        }
+
+        const response = await fetch(`${TIME_ENTRIES_URL()}/stop`, {
+          method: 'POST',
+          headers: {
+            Authorization: CONFIG.authHeader,
+            'Content-Type': 'application/json'
+          },
+        });
+
+        if (!response.ok) {
+          const errorText = await response.text().catch(() => '');
+          throw new Error(`Error stopping timer: ${response.status} ${response.statusText} - ${errorText}`);
+        }
+
+        const body: any = await response.json().catch(() => ({}));
+        const entry = body?.data;
+        if (!entry?.id) {
+          throw new Error(`Error stopping timer: unexpected response from ClickUp - ${JSON.stringify(body)}`);
+        }
+
+        const start = parseInt(entry.start);
+        const durationMs = Math.abs(parseInt(entry.duration)) || 0;
+        const end = parseInt(entry.end) || start + durationMs;
+
+        return textResult([
+          'Timer stopped!',
+          `entry_id: ${entry.id}`,
+          ...describeEntryTask(entry),
+          `duration: ${(durationMs / 3600000).toFixed(2)} hours (${formatHoursMinutes(durationMs)})`,
+          `start_time: ${timestampToIso(start)}`,
+          `end_time: ${timestampToIso(end)}`,
+          ...(entry.description ? [`description: ${entry.description}`] : []),
+        ].join('\n'));
+      } catch (error) {
+        console.error('Error stopping timer:', error);
+        return {
+          isError: true,
+          content: [{ type: "text" as const, text: `Error stopping timer: ${error instanceof Error ? error.message : 'Unknown error'}` }],
         };
       }
     }

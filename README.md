@@ -12,9 +12,9 @@ Model Context Protocol (MCP) server enabling AI assistants to interact with Clic
 | **Authentication**   | API key or ClickUp OAuth app (local browser login; remote: per-user ClickUp OAuth) | OAuth only                                  |
 | **Task Context**     | Complete with comments, status history, inline images | Requires mutiple tool calls for full contxt |
 | **Image Support**    | Read and write: inline images with smart size budgeting, and `![](local/path.png)` uploads automatically | Upload via separate tool calls; base64 capped at ~200KB |
-| **Search**           | Fuzzy search on recent tasks (limited scope)          | Full ClickUp search database                |
+| **Search**           | Structured filters across the workspace plus fuzzy search over recent tasks | Full-text search                            |
 | **Documents**        | CRUD operations                                       | CRUD + document search                      |
-| **Time Tracking**    | View and create entries                               | Timers and entries                          |
+| **Time Tracking**    | Timers and entries                                    | Timers and entries                          |
 | **Chat Integration** | Not supported                                         | Supported                                   |
 | **Connected Apps**   | Not supported                                         | Connected Search                            |
 | **Best For**         | Coding tools, automation, context gathering           | Chat apps, task management                  |
@@ -322,18 +322,36 @@ The ClickUp MCP supports three operational modes to balance functionality, secur
 | `getTaskById`          |      ✅       |  ✅   |   ✅   | Get complete task details including comments (with threaded replies), images, and metadata |
 | `addComment`           |      ❌       |  ❌   |   ✅   | Add comments to tasks, or reply inside a comment thread via `parent_comment_id`         |
 | `editComment`          |      ❌       |  ❌   |   ✅   | Correct your own comment within 24h instead of posting a follow-up                      |
-| `updateTask`           |      ❌       |  ❌   |   ✅   | Update tasks (status, priority, assignees, etc.); descriptions can be appended to or replaced entirely |
-| `createTask`           |      ❌       |  ❌   |   ✅   | Create new tasks with full markdown support                                             |
-| `searchTasks`          |      ✅       |  ✅   |   ✅   | Find tasks by content, keywords, assignees, or project context                          |
+| `updateTask` | ❌ | ❌ | ✅ | Update tasks (status, priority, assignees by ID/username/email, tags with add/remove, custom fields, etc.); descriptions can be appended to or replaced entirely |
+| `createTask` | ❌ | ❌ | ✅ | Create tasks with full markdown support, assignees by ID/username/email and custom fields |
+| `searchTasks` | ✅ | ✅ | ✅ | Filter tasks by assignees, tags, dates, custom fields, lists, spaces, folders or status, optionally with fuzzy text search |
 | `searchSpaces`         |      ❌       |  ✅   |   ✅   | Browse workspace structure, project organization, and documents                         |
 | `getListInfo`          |      ❌       |  ✅   |   ✅   | Get list details and available statuses for task creation                               |
 | `updateListInfo`       |      ❌       |  ❌   |   ✅   | **SAFE APPEND-ONLY** updates to list descriptions (preserves existing content)          |
 | `getTimeEntries`       |      ❌       |  ✅   |   ✅   | View time entries and analyze time spent across projects                                |
 | `createTimeEntry`      |      ❌       |  ❌   |   ✅   | Log time entries for task tracking                                                      |
 | `readDocument`         |      ❌       |  ✅   |   ✅   | Get document details, page structure, and content with navigation                       |
-| `searchDocuments`      |      ❌       |  ✅   |   ✅   | Search documents by name and space with fuzzy matching and space filtering              |
 | `updateDocumentPage`   |      ❌       |  ❌   |   ✅   | Update existing page content or name with replace/append modes                          |
 | `createDocumentOrPage` |      ❌       |  ❌   |   ✅   | Create new documents with first page, or add pages/sub-pages to existing documents      |
+| `getMembers` | ❌ | ✅ | ✅ | List workspace (or list) members with user IDs, emails and roles |
+| `getCustomFields` | ❌ | ✅ | ✅ | List custom field definitions and dropdown/label options of a list, folder or space |
+| `getRunningTimer` | ❌ | ✅ | ✅ | Show the currently running timer |
+| `deleteTask` | ❌ | ❌ | ✅ | Delete a task (two-step confirm) |
+| `moveTask` | ❌ | ❌ | ✅ | Move a task to another list (changes its home list; no ClickApp needed) |
+| `addTaskToList` | ❌ | ❌ | ✅ | Add a task to an additional list (needs Tasks in Multiple Lists ClickApp) |
+| `removeTaskFromList` | ❌ | ❌ | ✅ | Remove a task from an additional list (needs the ClickApp; two-step confirm) |
+| `startTimer` | ❌ | ❌ | ✅ | Start a live timer, optionally on a task |
+| `stopTimer` | ❌ | ❌ | ✅ | Stop the running timer |
+
+### Finding people and custom fields
+
+`createTask` and `updateTask` accept `assignees` as user IDs, usernames or emails. Names are matched exactly first, then by unique prefix, then by unique substring; an ambiguous name is an error that lists the candidates, so nothing is assigned to the wrong person. `getMembers` lists the workspace members (or the members of one list) with their IDs. `searchTasks` filters by `assignees` take numeric user IDs, so look them up with `getMembers` first.
+
+`getCustomFields` shows the custom fields of a list, folder or space with their `field_id`, type and valid options. Pass them to `createTask`/`updateTask` as `custom_fields` keyed by field name or ID. Dropdown and label values accept option names or IDs, dates accept ISO strings, user fields accept names or IDs, and booleans and numbers are passed as is. `updateTask` writes custom fields after the main update and reports a warning per field that failed.
+
+`addTaskToList` and `removeTaskFromList` need the "Tasks in Multiple Lists" ClickApp enabled for the Space, and a task can never be removed from its home list. `moveTask` uses ClickUp's dedicated move endpoint, needs no ClickApp and only changes the home list; pass `status` when the destination list lacks the task's current status (the tool then lists the destination's statuses) and `move_custom_fields=false` to leave custom fields behind. `deleteTask` and `removeTaskFromList` use a two-step confirm: the first call previews, the second call with `confirm=true` acts.
+
+Search limits: structured `searchTasks` filters are sent to ClickUp's filtered team tasks endpoint and capped at 5 pages (500 tasks) per call; a plain `terms` search uses the local index of up to 3,000 recently updated tasks. ClickUp's public API has no full-text workspace search.
 
 ### Setting the Mode
 

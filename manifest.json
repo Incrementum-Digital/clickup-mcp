@@ -46,15 +46,15 @@
     },
     {
       "name": "updateTask",
-      "description": "Update various aspects of an existing task including name, description (append a dated section or replace the whole text), status, priority, dates, tags, assignees, and parent relationships. Images in the description are uploaded and embedded automatically."
+      "description": "Update an existing task including name, description (append a dated section or replace the whole text), status, priority, dates, tags (replace, or add_tags/remove_tags), assignees by ID, username or email, custom fields, and parent relationships. Images in the description are uploaded and embedded automatically."
     },
     {
       "name": "createTask",
-      "description": "Create a new task in a specific list with full markdown support, assignment to users, and automatic linking to related tasks. Images in the description are uploaded and embedded automatically."
+      "description": "Create a new task in a specific list with full markdown support, assignment to users by ID, username or email, custom fields, and automatic linking to related tasks. Images in the description are uploaded and embedded automatically."
     },
     {
       "name": "searchTasks",
-      "description": "Search tasks by name, content, assignees, and ID with fuzzy matching and support for multiple search terms (OR logic). Can filter by list_ids, space_ids, todo status, or tasks assigned to current user."
+      "description": "Search tasks across the whole workspace with structured filters (assignees, tags, dates, custom fields, lists, spaces, folders, status) that ClickUp applies itself, optionally combined with fuzzy text matching on name, content, tags, assignees and ID (multiple terms, OR logic)."
     },
     {
       "name": "searchSpaces",
@@ -75,6 +75,42 @@
     {
       "name": "createTimeEntry",
       "description": "Create a time entry (book time) on a task for the current user using decimal hours format with optional description and start time."
+    },
+    {
+      "name": "getMembers",
+      "description": "List the workspace members (or the members of one list) with user_id, email and role, to look up user IDs."
+    },
+    {
+      "name": "getCustomFields",
+      "description": "List the custom field definitions of a list, folder or space with field_id, type, required flag and the valid options of dropdowns and labels."
+    },
+    {
+      "name": "deleteTask",
+      "description": "Delete a task (permanent through this tool; ClickUp keeps it in the Trash for 30 days). Two-step: call with confirm=false to preview, then confirm=true after the user approved."
+    },
+    {
+      "name": "moveTask",
+      "description": "Move a task to another list by changing its home list, without touching other list memberships. No ClickApp needed; optionally pass a destination status and whether to carry custom fields along."
+    },
+    {
+      "name": "addTaskToList",
+      "description": "Add a task to an additional list while keeping it in its current lists. Requires the Tasks in Multiple Lists ClickApp for the Space."
+    },
+    {
+      "name": "removeTaskFromList",
+      "description": "Remove a task from an additional list (never its home list). Requires the Tasks in Multiple Lists ClickApp; two-step confirm."
+    },
+    {
+      "name": "startTimer",
+      "description": "Start a live timer for the current user, optionally on a task. ClickUp allows only one running timer; stop it first with stopTimer."
+    },
+    {
+      "name": "stopTimer",
+      "description": "Stop the current user's running timer and report the finished entry with task, duration, start and end times."
+    },
+    {
+      "name": "getRunningTimer",
+      "description": "Get the current user's running timer, if any, including the task and elapsed time."
     },
     {
       "name": "readDocument",

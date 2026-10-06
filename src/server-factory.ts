@@ -10,6 +10,8 @@ import { registerSpaceTools } from "./tools/space-tools";
 import { registerListToolsRead, registerListToolsWrite } from "./tools/list-tools";
 import { registerTimeToolsRead, registerTimeToolsWrite } from "./tools/time-tools";
 import { registerDocumentToolsRead, registerDocumentToolsWrite } from "./tools/doc-tools";
+import { registerWorkspaceTools } from "./tools/workspace-tools";
+import { registerTaskAdminTools } from "./tools/task-admin-tools";
 import { registerSpaceResources } from "./resources/space-resources";
 
 /**
@@ -108,10 +110,12 @@ Use the ClickUp search tools to find tasks assigned to me, and get detailed info
     registerListToolsRead(server);
     registerTimeToolsRead(server);
     registerDocumentToolsRead(server);
+    registerWorkspaceTools(server);
   } else if (CONFIG.mode === 'write') {
     // All tools (full functionality)
     registerTaskToolsRead(server, userData);
     registerTaskToolsWrite(server, userData);
+    registerTaskAdminTools(server);
     registerSearchTools(server, userData);
     registerSpaceTools(server);
     registerSpaceResources(server);
@@ -121,6 +125,7 @@ Use the ClickUp search tools to find tasks assigned to me, and get detailed info
     registerTimeToolsWrite(server);
     registerDocumentToolsRead(server);
     registerDocumentToolsWrite(server);
+    registerWorkspaceTools(server);
   }
 
 

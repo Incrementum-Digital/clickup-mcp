@@ -3,7 +3,7 @@ import { z } from "zod";
 import { convertMarkdownToToolCallResult, convertClickUpTextItemsToToolCallResult } from "../clickup-text";
 import { ContentBlock, DatedContentEvent, ImageMetadataBlock } from "../shared/types";
 import { CONFIG } from "../shared/config";
-import { isTaskId, getSpaceDetails, getAllTeamMembers } from "../shared/utils";
+import { isTaskId, getSpaceDetails, getSpaceNameFromIndex, getAllTeamMembers } from "../shared/utils";
 import { downloadImages } from "../shared/image-processing";
 import { ExistingComment, fetchAllTopLevelComments, fetchRepliesByComment } from "../shared/comments";
 
@@ -306,18 +306,36 @@ function filterTaskTimeEntries(taskId: string, timeEntries: any[]): string | nul
 /**
  * Helper function to generate consistent task metadata
  */
-export async function generateTaskMetadata(task: any, timeEntries?: any[], isDetailView: boolean = false): Promise<ContentBlock> {
-  let spaceName = task.space?.name || 'Unknown Space';
+/** Limits how many distinct spaces may be fetched individually while rendering a list of tasks. */
+export interface SpaceLookupBudget {
+  max: number;
+  attempted: Set<string>;
+}
+
+export async function generateTaskMetadata(task: any, timeEntries?: any[], isDetailView: boolean = false, spaceLookups?: SpaceLookupBudget): Promise<ContentBlock> {
+  let spaceName: string = task.space?.name || 'Unknown Space';
   let spaceIdForDisplay = task.space?.id || 'N/A';
+  let spaceLine: string | undefined;
 
   if (spaceName === 'Unknown Space' && task.space?.id) {
-    try {
-      const spaceDetails = await getSpaceDetails(task.space.id);
-      if (spaceDetails && spaceDetails.name) {
-        spaceName = spaceDetails.name;
+    const spaceId: string = task.space.id;
+    // The cached space list (one request for all spaces) first, then a per-space request
+    const indexedName = await getSpaceNameFromIndex(spaceId);
+    if (indexedName) {
+      spaceName = indexedName;
+    } else if (spaceLookups && !spaceLookups.attempted.has(spaceId) && spaceLookups.attempted.size >= spaceLookups.max) {
+      // Budget exhausted: show the id only instead of spending another request
+      spaceLine = `space_id: ${spaceId}`;
+    } else {
+      spaceLookups?.attempted.add(spaceId);
+      try {
+        const spaceDetails = await getSpaceDetails(spaceId);
+        if (spaceDetails && spaceDetails.name) {
+          spaceName = spaceDetails.name;
+        }
+      } catch {
+        // Space details fetch can fail (e.g. 401) - gracefully keep "Unknown Space"
       }
-    } catch {
-      // Space details fetch can fail (e.g. 401) - gracefully keep "Unknown Space"
     }
   }
 
@@ -331,7 +349,7 @@ export async function generateTaskMetadata(task: any, timeEntries?: any[], isDet
     `creator: ${task.creator.username} (${task.creator.id})`,
     `assignee: ${task.assignees.map((a: any) => `${a.username} (${a.id})`).join(', ')}`,
     `list: ${task.list.name} (${task.list.id})`,
-    `space: ${spaceName} (${spaceIdForDisplay})`,
+    spaceLine ?? `space: ${spaceName} (${spaceIdForDisplay})`,
   ];
 
   // Add priority if it exists

@@ -22,6 +22,16 @@ import {
   fetchCommentPage,
   findTopLevelComment,
 } from "../shared/comments";
+import { resolveAssigneesDetailed, formatMember } from "../shared/members";
+import {
+  buildCreateCustomFields,
+  checkCreatedCustomFields,
+  executeCustomFieldWrites,
+  formatCreatedCustomFields,
+  formatCustomFieldResult,
+  prepareCustomFieldWrites,
+  PreparedCustomFieldWrite,
+} from "../shared/custom-fields";
 
 /**
  * Shared wording for the image support of every markdown field in this file.
@@ -147,6 +157,15 @@ const taskDueDateSchema = z.string().optional().describe("Optional due date as I
 const taskStartDateSchema = z.string().optional().describe("Optional start date as ISO date string (e.g., '2024-10-06T09:00:00+02:00')");
 const taskTimeEstimateSchema = z.number().optional().describe("Optional time estimate in hours (will be converted to milliseconds)");
 const taskTagsSchema = z.array(z.string()).optional().describe("Optional array of tag names");
+const taskCustomFieldsSchema = z.record(z.string(), z.unknown()).optional().describe(
+  [
+    "Optional custom field values keyed by field NAME (case-insensitive) or field_id, e.g. {\"Client\": \"Acme\", \"Budget\": 1500}. Use getCustomFields with the task's list_id to see the fields and their types (max 20 per call).",
+    "Values by type: text/url/email/phone = string; number/currency = number; checkbox = true/false; date = ISO string (\"2025-12-31\" or \"2025-12-31T14:30:00+01:00\") or Unix ms;",
+    "drop_down = option name or option_id; labels = array of option names or ids; users = array of user ids, usernames or emails; tasks = array of task ids;",
+    "location = {location: {lat, lng}, formatted_address}. On updateTask, null clears a field.",
+  ].join(" ")
+);
+const taskAssigneesDescription = "Optional array of assignees: user IDs, usernames or emails (names are matched case-insensitively and must be unambiguous - use getMembers to look them up)";
 
 export function registerTaskToolsWrite(server: McpServer, userData: any) {
   server.tool(
@@ -410,9 +429,12 @@ export function registerTaskToolsWrite(server: McpServer, userData: any) {
       due_date: taskDueDateSchema,
       start_date: taskStartDateSchema,
       time_estimate: taskTimeEstimateSchema,
-      tags: taskTagsSchema.describe("Optional array of tag names (will replace existing tags)"),
+      tags: taskTagsSchema.describe("Optional array of tag names (will REPLACE all existing tags). To change single tags use add_tags / remove_tags instead; cannot be combined with them."),
+      add_tags: z.array(z.string()).optional().describe("Optional tag names to add, keeping the existing tags. Cannot be combined with `tags`."),
+      remove_tags: z.array(z.string()).optional().describe("Optional tag names to remove, keeping all other tags. Cannot be combined with `tags`."),
       parent_task_id: z.string().optional().describe("Optional parent task ID to change parent/child relationships"),
-      assignees: z.array(z.string()).optional().describe(createAssigneeDescription(userData)),
+      assignees: z.array(z.string()).optional().describe(createAssigneeDescription(userData, "ADDED to the current assignees (none are removed)")),
+      custom_fields: taskCustomFieldsSchema,
       waiting_on: z.array(z.string()).optional().describe("Optional array of task IDs that this task should wait on (will replace existing waiting_on relationships)"),
       blocking: z.array(z.string()).optional().describe("Optional array of task IDs that this task should block. Note: This creates dependencies FROM those tasks TO this task (those tasks will wait on this one)"),
       linked_tasks: z.array(z.string()).optional().describe("Optional array of task IDs to link as related tasks without blocking (will replace existing linked tasks)")
@@ -423,7 +445,7 @@ export function registerTaskToolsWrite(server: McpServer, userData: any) {
       idempotentHint: false,
       openWorldHint: true
     },
-    async ({ task_id, name, description, append_description, status, priority, due_date, start_date, time_estimate, tags, parent_task_id, assignees, blocking, waiting_on, linked_tasks }) => {
+    async ({ task_id, name, description, append_description, status, priority, due_date, start_date, time_estimate, tags, add_tags, remove_tags, parent_task_id, assignees, custom_fields, blocking, waiting_on, linked_tasks }) => {
       try {
         if (description !== undefined && append_description !== undefined) {
           return {
@@ -434,7 +456,21 @@ export function registerTaskToolsWrite(server: McpServer, userData: any) {
           };
         }
 
+        if (tags !== undefined && (add_tags !== undefined || remove_tags !== undefined)) {
+          return {
+            content: [{
+              type: "text" as const,
+              text: "Error: `tags` (replace all tags) cannot be combined with `add_tags` / `remove_tags` - use `tags` alone to replace the tag set, or `add_tags` / `remove_tags` to change single tags. The task was NOT updated."
+            }],
+          };
+        }
+
         const userData = await getCurrentUser();
+
+        // Resolve names/emails to user ids before anything is written, so an unknown
+        // or ambiguous assignee aborts the call without a partial update.
+        const resolvedAssignees = assignees !== undefined ? await resolveAssigneesDetailed(assignees) : undefined;
+        const assigneeIds = resolvedAssignees?.map((a) => a.id);
 
         // Get task details including current markdown description
         const taskResponse = await fetch(`https://api.clickup.com/api/v2/task/${task_id}?include_markdown_description=true`, {
@@ -446,6 +482,24 @@ export function registerTaskToolsWrite(server: McpServer, userData: any) {
         }
 
         const taskData = await taskResponse.json();
+
+        // Validate the custom fields BEFORE anything is written: the definitions of
+        // the task's list are loaded and every key and value converted now, so an
+        // unknown field, an invalid value or a failing definitions request aborts the
+        // call without a partial update. Only the per-field writes remain after the PUT.
+        const customFieldCount = custom_fields ? Object.keys(custom_fields).length : 0;
+        let customFieldWrites: PreparedCustomFieldWrite[] = [];
+        if (customFieldCount > 0) {
+          const listId = taskData.list?.id;
+          if (!listId) {
+            throw new Error(`Could not determine the list of task ${task_id}, so its custom fields cannot be checked. The task was NOT updated.`);
+          }
+          try {
+            customFieldWrites = await prepareCustomFieldWrites(String(listId), custom_fields!);
+          } catch (error) {
+            throw new Error(`${error instanceof Error ? error.message : String(error)}. The task was NOT updated.`);
+          }
+        }
 
         // Resolve and upload description images FIRST - an image problem must
         // abort before dependencies, tags or the task itself are touched, so the
@@ -528,6 +582,36 @@ export function registerTaskToolsWrite(server: McpServer, userData: any) {
           }
         }
 
+        // Single tag changes: skip what is already (not) on the task, so a repeated
+        // call neither re-adds nor fails on removing a tag that is gone.
+        const currentTagNames = new Set<string>(
+          (taskData.tags || []).map((t: any) => String(t.name).toLowerCase())
+        );
+        const addedTags: string[] = [];
+        for (const tagName of add_tags ?? []) {
+          if (currentTagNames.has(tagName.toLowerCase())) {
+            continue;
+          }
+          const warning = await changeTag(task_id, 'add', tagName);
+          if (warning) {
+            tagUpdateResults.push(warning);
+          } else {
+            addedTags.push(tagName);
+          }
+        }
+        const removedTags: string[] = [];
+        for (const tagName of remove_tags ?? []) {
+          if (!currentTagNames.has(tagName.toLowerCase())) {
+            continue;
+          }
+          const warning = await changeTag(task_id, 'remove', tagName);
+          if (warning) {
+            tagUpdateResults.push(warning);
+          } else {
+            removedTags.push(tagName);
+          }
+        }
+
         // Build the description to write: a full replacement, or the existing
         // text plus a dated append section.
         let finalDescription: string | undefined;
@@ -542,7 +626,7 @@ export function registerTaskToolsWrite(server: McpServer, userData: any) {
 
         // Build update body without tags (they're handled separately)
         const updateBody = buildTaskRequestBody({
-          name, status, priority, due_date, start_date, time_estimate, parent_task_id, assignees
+          name, status, priority, due_date, start_date, time_estimate, parent_task_id, assignees: assigneeIds
         });
 
         // Add markdown description if we have content to append
@@ -552,11 +636,12 @@ export function registerTaskToolsWrite(server: McpServer, userData: any) {
 
         // Handle assignees for updates (different from creates)
         if (assignees !== undefined) {
-          updateBody.assignees = { add: assignees, rem: [] }; // Add new assignees, remove none
+          updateBody.assignees = { add: assigneeIds, rem: [] }; // Add new assignees, remove none
         }
 
         // Check if there's anything to update (including tags and dependencies which were handled separately)
-        if (Object.keys(updateBody).length === 0 && tags === undefined && blocking === undefined && waiting_on === undefined && linked_tasks === undefined) {
+        const tagsChanged = tags !== undefined || (add_tags?.length ?? 0) > 0 || (remove_tags?.length ?? 0) > 0;
+        if (Object.keys(updateBody).length === 0 && !tagsChanged && customFieldCount === 0 && blocking === undefined && waiting_on === undefined && linked_tasks === undefined) {
           return {
             content: [
               {
@@ -587,8 +672,18 @@ export function registerTaskToolsWrite(server: McpServer, userData: any) {
           updatedTask = await updateResponse.json();
         }
 
-        // If only tags or dependencies were updated, fetch the task again to get the updated state
-        if ((tags !== undefined || blocking !== undefined || waiting_on !== undefined || linked_tasks !== undefined) && Object.keys(updateBody).length === 0) {
+        // Custom fields have no field in the task update body: write the validated
+        // values one by one now that the task is updated.
+        let customFieldLines: string[] = [];
+        let customFieldFailures: Array<{ field: string; error: string }> = [];
+        if (customFieldWrites.length > 0) {
+          const written = await executeCustomFieldWrites(task_id, customFieldWrites);
+          customFieldLines = formatCustomFieldResult(written);
+          customFieldFailures = written.failed;
+        }
+
+        // If only tags, dependencies or custom fields were updated, fetch the task again to get the updated state
+        if ((tagsChanged || customFieldCount > 0 || blocking !== undefined || waiting_on !== undefined || linked_tasks !== undefined) && Object.keys(updateBody).length === 0) {
           const refreshResponse = await fetch(`https://api.clickup.com/api/v2/task/${task_id}`, {
             headers: { Authorization: CONFIG.authHeader },
           });
@@ -600,6 +695,31 @@ export function registerTaskToolsWrite(server: McpServer, userData: any) {
         const responseLines = formatTaskResponse(updatedTask, 'updated', {
           name, description, append_description, status, priority, due_date, start_date, time_estimate, tags, parent_task_id, assignees, blocking, waiting_on, linked_tasks
         }, userData);
+
+        responseLines.push(...formatResolvedAssignees(resolvedAssignees));
+        if (addedTags.length > 0) {
+          responseLines.push(`tags_added: ${addedTags.join(', ')}`);
+        }
+        if (removedTags.length > 0) {
+          responseLines.push(`tags_removed: ${removedTags.join(', ')}`);
+        }
+        responseLines.push(...customFieldLines);
+
+        // The update was committed but some custom fields were not written: say so up
+        // front instead of letting the headline read as a failure of the whole call
+        // (or as a complete success).
+        if (customFieldFailures.length > 0) {
+          const committed: string[] = Object.keys(updateBody).map((key) =>
+            key === 'markdown_description' ? 'description' : key === 'parent' ? 'parent_task_id' : key
+          );
+          if (tagsChanged) committed.push('tags');
+          if (blocking !== undefined || waiting_on !== undefined || linked_tasks !== undefined) committed.push('dependencies/links');
+          responseLines[0] = `Task updated PARTIALLY: the task changes were saved, but ${customFieldFailures.length} of ${customFieldWrites.length} custom field(s) were NOT written.`;
+          responseLines.push(
+            `committed_changes: ${committed.length > 0 ? committed.join(', ') : 'none besides the custom fields that were set'}`,
+            `custom_fields_not_written: ${customFieldFailures.map((f) => f.field).join(', ')} (see custom_field_warnings; retry them with updateTask custom_fields only)`
+          );
+        }
 
         if (description !== undefined) {
           const previousLength = (taskData.markdown_description || "").length;
@@ -677,7 +797,8 @@ export function registerTaskToolsWrite(server: McpServer, userData: any) {
       time_estimate: taskTimeEstimateSchema,
       tags: taskTagsSchema,
       parent_task_id: z.string().optional().describe("Optional parent task ID to create this as a subtask"),
-      assignees: z.array(z.string()).optional().describe(createAssigneeDescription(userData))
+      assignees: z.array(z.string()).optional().describe(createAssigneeDescription(userData, "defaults to the current user when omitted")),
+      custom_fields: taskCustomFieldsSchema
     },
     {
       readOnlyHint: false,
@@ -685,7 +806,7 @@ export function registerTaskToolsWrite(server: McpServer, userData: any) {
       idempotentHint: false,
       openWorldHint: true
     },
-    async ({ list_id, name, description, status, priority, due_date, start_date, time_estimate, tags, parent_task_id, assignees }) => {
+    async ({ list_id, name, description, status, priority, due_date, start_date, time_estimate, tags, parent_task_id, assignees, custom_fields }) => {
       try {
         // Resolve description images BEFORE creating the task: a broken reference
         // (missing file, dead URL, non-image) must not leave a half-finished task
@@ -699,9 +820,20 @@ export function registerTaskToolsWrite(server: McpServer, userData: any) {
         const userData = await getCurrentUser();
         const currentUserId = userData.user.id;
 
+        // Assignee names and custom field values are validated before the task is
+        // created, so a typo cannot leave a half-configured task behind.
+        const resolvedAssignees = assignees !== undefined ? await resolveAssigneesDetailed(assignees) : undefined;
+        const { fields: customFieldValues, names: customFieldNames } = custom_fields
+          ? await buildCreateCustomFields(list_id, custom_fields)
+          : { fields: [], names: {} as Record<string, string> };
+
         const requestBody = buildTaskRequestBody({
-          name, status, priority, due_date, start_date, time_estimate, tags, assignees, parent_task_id
+          name, status, priority, due_date, start_date, time_estimate, tags, assignees: resolvedAssignees?.map((a) => a.id), parent_task_id
         }, currentUserId);
+
+        if (customFieldValues.length > 0) {
+          requestBody.custom_fields = customFieldValues;
+        }
 
         // Add markdown description if provided
         if (description) {
@@ -789,6 +921,30 @@ export function registerTaskToolsWrite(server: McpServer, userData: any) {
           list_id, name, description, status, priority, due_date, start_date, time_estimate, tags, parent_task_id, assignees
         }, userData);
 
+        responseLines.push(...formatResolvedAssignees(resolvedAssignees));
+        if (customFieldValues.length > 0) {
+          // ClickUp silently drops custom fields that do not apply to the task, so
+          // report what is actually on the created task, not what was submitted.
+          let createdFields = createdTask;
+          if (!Array.isArray(createdTask.custom_fields)) {
+            try {
+              const refreshed = await fetch(`https://api.clickup.com/api/v2/task/${createdTask.id}`, {
+                headers: { Authorization: CONFIG.authHeader },
+              });
+              if (refreshed.ok) {
+                createdFields = await refreshed.json();
+              }
+            } catch (error) {
+              console.error('Error re-reading created task for custom fields:', error);
+            }
+          }
+          if (Array.isArray(createdFields.custom_fields)) {
+            responseLines.push(...formatCreatedCustomFields(checkCreatedCustomFields(createdFields, customFieldValues, customFieldNames)));
+          } else {
+            responseLines.push(`custom_fields: sent ${customFieldValues.length}, could not verify that ClickUp saved them - check the task`);
+          }
+        }
+
         responseLines.push(...formatAttachedImages(uploaded));
         responseLines.push(...imageWarnings);
         if (tagCreateResults.length > 0) {
@@ -821,9 +977,38 @@ export function registerTaskToolsWrite(server: McpServer, userData: any) {
 
 // Write-specific utility functions
 
-function createAssigneeDescription(userData: any): string {
+function createAssigneeDescription(userData: any, behavior: string): string {
   const user = userData.user;
-  return `Optional array of user IDs to assign to the task (defaults to current user: ${user.username} (${user.id}))`;
+  return `${taskAssigneesDescription} - ${behavior} (current user: ${user.username} (user_id: ${user.id}))`;
+}
+
+/** Name the users that a username/email input resolved to, so a wrong guess is visible. */
+function formatResolvedAssignees(resolved: Array<{ id: string; username?: string }> | undefined): string[] {
+  if (!resolved || !resolved.some((a) => a.username)) {
+    return [];
+  }
+  return [`assignees_resolved: ${resolved.map((a) => formatMember(a)).join(', ')}`];
+}
+
+/** Add or remove a single tag; returns a warning text on failure, null on success. */
+async function changeTag(taskId: string, operation: 'add' | 'remove', tagName: string): Promise<string | null> {
+  try {
+    const response = await fetch(
+      `https://api.clickup.com/api/v2/task/${taskId}/tag/${encodeURIComponent(tagName)}`,
+      {
+        method: operation === 'add' ? 'POST' : 'DELETE',
+        headers: { Authorization: CONFIG.authHeader }
+      }
+    );
+    if (!response.ok) {
+      console.error(`Failed to ${operation} tag "${tagName}": ${response.status}`);
+      return `Failed to ${operation} tag: ${tagName}`;
+    }
+    return null;
+  } catch (error) {
+    console.error(`Error changing tag "${tagName}":`, error);
+    return `Error trying to ${operation} tag: ${tagName}`;
+  }
 }
 
 function convertPriorityToNumber(priority: string): number {
@@ -1020,9 +1205,23 @@ async function updateTaskDependencies(
 ): Promise<string[]> {
   const errors: string[] = [];
   
-  // Get current dependencies
-  const currentBlocking = taskData.blocking?.map((dep: any) => dep.id) || [];
-  const currentWaitingOn = taskData.waiting_on?.map((dep: any) => dep.id) || [];
+  // Get current dependencies. The API never returns `blocking` / `waiting_on` on a
+  // task (reading them found nothing, so no dependency could ever be removed);
+  // it returns one flat `dependencies` array of `{ task_id, depends_on }` pairs
+  // meaning "task_id waits on depends_on". Which side this task sits on decides the
+  // direction - the same reading getTaskById uses, and the exact inverse of what the
+  // add code below writes (POST /task/{waiting}/dependency { depends_on: {blocker} }).
+  // `type` is deliberately not consulted: the API does not use it consistently.
+  const ownIds = new Set<string>([taskId, String(taskData.id ?? taskId)]);
+  const dependencyPairs: any[] = Array.isArray(taskData.dependencies) ? taskData.dependencies : [];
+  const unique = (ids: any[]): string[] => Array.from(new Set(ids.filter(Boolean).map(String)));
+  // Tasks waiting on this one are the ones this task is blocking.
+  const currentBlocking = unique(
+    dependencyPairs.filter((dep) => ownIds.has(String(dep.depends_on))).map((dep) => dep.task_id)
+  );
+  const currentWaitingOn = unique(
+    dependencyPairs.filter((dep) => ownIds.has(String(dep.task_id))).map((dep) => dep.depends_on)
+  );
   // `linked_tasks` entries are link records, not tasks: each has `task_id` and
   // `link_id` (the two ends of the link) and no `id` at all. Mapping `.id` here
   // produced `[undefined, ...]`, so every existing link looked like it was no
@@ -1143,10 +1342,10 @@ function formatTaskResponse(task: any, operation: 'created' | 'updated', params:
     `name: ${task.name}`,
     ...(operation === 'created' ? [`url: ${task.url}`] : []),
     `status: ${task.status?.status || 'Unknown'}`,
-    `assignees: ${task.assignees?.map((a: any) => `${a.username} (${a.id})`).join(', ') || 'None'}`,
+    `assignees: ${task.assignees?.map((a: any) => formatMember(a)).join(', ') || 'None'}`,
     ...(operation === 'created' && params.list_id ? [`list_id: ${params.list_id}`] : []),
     ...(operation === 'updated' ? [
-      `updated_by: ${userData.user.username} (${userData.user.id})`,
+      `updated_by: ${formatMember(userData.user)}`,
       `updated_at: ${timestampToIso(Date.now())}`
     ] : [])
   ];
