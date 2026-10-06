@@ -229,7 +229,7 @@ export function registerTaskToolsWrite(server: McpServer, userData: any) {
         const response = await fetch(url, {
           method: 'POST',
           headers: {
-            Authorization: CONFIG.apiKey,
+            Authorization: CONFIG.authHeader,
             'Content-Type': 'application/json'
           },
           body: JSON.stringify(requestBody)
@@ -333,7 +333,7 @@ export function registerTaskToolsWrite(server: McpServer, userData: any) {
         const response = await fetch(`https://api.clickup.com/api/v2/comment/${comment_id}`, {
           method: 'PUT',
           headers: {
-            Authorization: CONFIG.apiKey,
+            Authorization: CONFIG.authHeader,
             'Content-Type': 'application/json'
           },
           body: JSON.stringify({ comment: commentBlocks })
@@ -438,7 +438,7 @@ export function registerTaskToolsWrite(server: McpServer, userData: any) {
 
         // Get task details including current markdown description
         const taskResponse = await fetch(`https://api.clickup.com/api/v2/task/${task_id}?include_markdown_description=true`, {
-          headers: { Authorization: CONFIG.apiKey },
+          headers: { Authorization: CONFIG.authHeader },
         });
 
         if (!taskResponse.ok) {
@@ -494,7 +494,7 @@ export function registerTaskToolsWrite(server: McpServer, userData: any) {
                 `https://api.clickup.com/api/v2/task/${task_id}/tag/${encodeURIComponent(tagName)}`,
                 {
                   method: 'POST',
-                  headers: { Authorization: CONFIG.apiKey }
+                  headers: { Authorization: CONFIG.authHeader }
                 }
               );
               if (!addTagResponse.ok) {
@@ -514,7 +514,7 @@ export function registerTaskToolsWrite(server: McpServer, userData: any) {
                 `https://api.clickup.com/api/v2/task/${task_id}/tag/${encodeURIComponent(tagName)}`,
                 {
                   method: 'DELETE',
-                  headers: { Authorization: CONFIG.apiKey }
+                  headers: { Authorization: CONFIG.authHeader }
                 }
               );
               if (!removeTagResponse.ok) {
@@ -573,7 +573,7 @@ export function registerTaskToolsWrite(server: McpServer, userData: any) {
           const updateResponse = await fetch(`https://api.clickup.com/api/v2/task/${task_id}`, {
             method: 'PUT',
             headers: {
-              Authorization: CONFIG.apiKey,
+              Authorization: CONFIG.authHeader,
               'Content-Type': 'application/json'
             },
             body: JSON.stringify(updateBody)
@@ -590,7 +590,7 @@ export function registerTaskToolsWrite(server: McpServer, userData: any) {
         // If only tags or dependencies were updated, fetch the task again to get the updated state
         if ((tags !== undefined || blocking !== undefined || waiting_on !== undefined || linked_tasks !== undefined) && Object.keys(updateBody).length === 0) {
           const refreshResponse = await fetch(`https://api.clickup.com/api/v2/task/${task_id}`, {
-            headers: { Authorization: CONFIG.apiKey },
+            headers: { Authorization: CONFIG.authHeader },
           });
           if (refreshResponse.ok) {
             updatedTask = await refreshResponse.json();
@@ -711,7 +711,7 @@ export function registerTaskToolsWrite(server: McpServer, userData: any) {
         const response = await fetch(`https://api.clickup.com/api/v2/list/${list_id}/task`, {
           method: 'POST',
           headers: {
-            Authorization: CONFIG.apiKey,
+            Authorization: CONFIG.authHeader,
             'Content-Type': 'application/json'
           },
           body: JSON.stringify(requestBody)
@@ -735,7 +735,7 @@ export function registerTaskToolsWrite(server: McpServer, userData: any) {
                 `https://api.clickup.com/api/v2/task/${createdTask.id}/tag/${encodeURIComponent(tagName)}`,
                 {
                   method: 'POST',
-                  headers: { Authorization: CONFIG.apiKey }
+                  headers: { Authorization: CONFIG.authHeader }
                 }
               );
               if (!addTagResponse.ok) {
@@ -770,7 +770,7 @@ export function registerTaskToolsWrite(server: McpServer, userData: any) {
             const descriptionResponse = await fetch(`https://api.clickup.com/api/v2/task/${createdTask.id}`, {
               method: 'PUT',
               headers: {
-                Authorization: CONFIG.apiKey,
+                Authorization: CONFIG.authHeader,
                 'Content-Type': 'application/json'
               },
               body: JSON.stringify({ markdown_description: rewritten })
@@ -1051,7 +1051,7 @@ async function updateTaskDependencies(
         url = `https://api.clickup.com/api/v2/task/${fromTaskId}/link/${toTaskId}`;
         options = {
           method: operation === 'add' ? 'POST' : 'DELETE',
-          headers: { Authorization: CONFIG.apiKey }
+          headers: { Authorization: CONFIG.authHeader }
         };
       } else {
         // Dependencies (blocking/waiting_on)
@@ -1060,7 +1060,7 @@ async function updateTaskDependencies(
           options = {
             method: 'POST',
             headers: {
-              Authorization: CONFIG.apiKey,
+              Authorization: CONFIG.authHeader,
               'Content-Type': 'application/json'
             },
             body: JSON.stringify({
@@ -1073,7 +1073,7 @@ async function updateTaskDependencies(
           url = `https://api.clickup.com/api/v2/task/${fromTaskId}/dependency?depends_on=${dependsOn}`;
           options = {
             method: 'DELETE',
-            headers: { Authorization: CONFIG.apiKey }
+            headers: { Authorization: CONFIG.authHeader }
           };
         }
       }

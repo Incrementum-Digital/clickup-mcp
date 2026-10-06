@@ -1,3 +1,5 @@
+import { getRequestCredentials } from "./request-context";
+
 export const rawPrimaryLang = process.env.CLICKUP_PRIMARY_LANGUAGE || process.env.LANG;
 let detectedLanguageHint: string | undefined = undefined;
 
@@ -64,7 +66,7 @@ if (rawMode === 'read-minimal' || rawMode === 'read') {
  * field - as the literal `${user_config.x}` placeholder. Both mean "not configured"
  * and must fall back to the default rather than fail or turn into NaN.
  */
-function readOptionalEnv(name: string): string | undefined {
+export function readOptionalEnv(name: string): string | undefined {
   const raw = process.env[name]?.trim();
   if (!raw || /^\$\{.*}$/.test(raw)) {
     return undefined;
@@ -94,9 +96,49 @@ function parseNumericEnv(
   return value;
 }
 
+/**
+ * Personal tokens (`pk_...`) are sent raw; OAuth access tokens need the `Bearer` scheme.
+ */
+export function formatAuthHeader(token: string): string {
+  return /^pk_/.test(token) ? token : `Bearer ${token}`;
+}
+
+// Inside runWithCredentials() (HTTP mode) the getters below read the request's credentials
+// instead, so concurrent users never see each other's token.
+//
+// Credentials are mutable module state: they are seeded from the environment at load
+// (so the synchronous env path keeps working) and filled in later by ensureCredentials()
+// when they come from a token file, an OAuth flow or team auto-detection.
+let currentToken: string | undefined = readOptionalEnv("CLICKUP_API_KEY");
+let currentTeamId: string | undefined = readOptionalEnv("CLICKUP_TEAM_ID");
+
+export function setCredentials(token: string, teamId: string): void {
+  currentToken = token;
+  currentTeamId = teamId;
+}
+
+function credentialsNotResolved(): Error {
+  return new Error(
+    "ClickUp credentials not resolved yet. ensureCredentials() must complete before any API call."
+  );
+}
+
 export const CONFIG = {
-  apiKey: process.env.CLICKUP_API_KEY!,
-  teamId: process.env.CLICKUP_TEAM_ID!,
+  get apiKey(): string {
+    const token = getRequestCredentials()?.token ?? currentToken;
+    if (!token) throw credentialsNotResolved();
+    return token;
+  },
+  get authHeader(): string {
+    const token = getRequestCredentials()?.token ?? currentToken;
+    if (!token) throw credentialsNotResolved();
+    return formatAuthHeader(token);
+  },
+  get teamId(): string {
+    const teamId = getRequestCredentials()?.teamId ?? currentTeamId;
+    if (!teamId) throw credentialsNotResolved();
+    return teamId;
+  },
   maxImages: process.env.MAX_IMAGES ? parseInt(process.env.MAX_IMAGES) : 4,
   maxResponseSizeMB: process.env.MAX_RESPONSE_SIZE_MB ? parseFloat(process.env.MAX_RESPONSE_SIZE_MB) : 1,
   // Upper bound for a single image uploaded to ClickUp. Unlike maxResponseSizeMB this is
@@ -116,7 +158,3 @@ export const CONFIG = {
   primaryLanguageHint: detectedLanguageHint, // Store the cleaned code directly
   mode: mcpMode,
 };
-
-if (!CONFIG.apiKey || !CONFIG.teamId) {
-  throw new Error("Missing Clickup API key or team ID");
-}

@@ -23,7 +23,7 @@ export function registerListToolsRead(server: McpServer) {
       try {
         // Get list details including statuses (try to get markdown content)
         const listResponse = await fetch(`https://api.clickup.com/api/v2/list/${list_id}?include_markdown_description=true`, {
-          headers: { Authorization: CONFIG.apiKey },
+          headers: { Authorization: CONFIG.authHeader },
         });
 
         if (!listResponse.ok) {
@@ -37,7 +37,7 @@ export function registerListToolsRead(server: McpServer) {
         if (listData.space?.id) {
           try {
             const spaceTagsResponse = await fetch(`https://api.clickup.com/api/v2/space/${listData.space.id}/tag`, {
-              headers: { Authorization: CONFIG.apiKey },
+              headers: { Authorization: CONFIG.authHeader },
             });
             if (spaceTagsResponse.ok) {
               const spaceTagsData = await spaceTagsResponse.json();
@@ -143,7 +143,7 @@ export function registerListToolsWrite(server: McpServer) {
       try {
         // Get current list info including description (try to get markdown content)
         const listResponse = await fetch(`https://api.clickup.com/api/v2/list/${list_id}?include_markdown_description=true`, {
-          headers: { Authorization: CONFIG.apiKey },
+          headers: { Authorization: CONFIG.authHeader },
         });
 
         if (!listResponse.ok) {
@@ -162,7 +162,7 @@ export function registerListToolsWrite(server: McpServer) {
         const updateResponse = await fetch(`https://api.clickup.com/api/v2/list/${list_id}`, {
           method: 'PUT',
           headers: {
-            Authorization: CONFIG.apiKey,
+            Authorization: CONFIG.authHeader,
             'Content-Type': 'application/json'
           },
           body: JSON.stringify({

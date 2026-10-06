@@ -19,7 +19,8 @@
     "prepublishOnly": "rm -r dist && npm run build",
     "release": "npm run build && npm publish --access public && git add . && git commit -m \"Release v$(node -p 'require(\"./package.json\").version')\" && git tag -a v$(node -p 'require(\"./package.json\").version') -m \"Release v$(node -p 'require(\"./package.json\").version')\" && git push && git push --tags",
     "mcpb": "npm run build && mcpb pack . ClickUp.mcpb",
-    "test": "node --test -r ts-node/register -r ./src/tests/setup.ts src/**/*.test.ts"
+    "test": "node --test -r ts-node/register -r ./src/tests/setup.ts src/**/*.test.ts",
+    "start:http": "node dist/http.js"
   },
   "keywords": [
     "clickup",
@@ -42,6 +43,8 @@
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.15.1",
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
     "fuse.js": "^7.1.0",
     "remark-gfm": "^4.0.1",
     "remark-parse": "^11.0.0",
@@ -50,6 +53,8 @@
   },
   "devDependencies": {
     "@anthropic-ai/mcpb": "^1.1.1",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
     "@types/mdast": "^4.0.4",
     "@types/node": "^22.14.1",
     "dotenv": "^16.5.0",
@@ -60,7 +65,7 @@
     "undici": "^7.16.0"
   },
   "engines": {
-    "node": ">=16.0.0"
+    "node": ">=18"
   },
   "repository": {
     "type": "git",

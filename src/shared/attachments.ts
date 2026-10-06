@@ -5,6 +5,8 @@ import { basename, extname, isAbsolute, resolve } from "path";
 import { CONFIG } from "./config";
 import { parseDataUri } from "./data-uri";
 import { detectMimeTypeFromBuffer } from "./image-processing";
+import { getRequestCredentials } from "./request-context";
+import { fetchPublicBytes } from "./ssrf";
 
 /**
  * Attachment object as returned by POST /api/v2/task/{task_id}/attachment.
@@ -99,6 +101,11 @@ export function isClickUpAttachmentUrl(url: string): boolean {
  * The local path case is the interesting one: this server runs next to the agent,
  * so a screenshot can be referenced by path instead of being inlined as base64,
  * which would otherwise cost a multiple of the file size in tokens.
+ *
+ * Hosted mode (inside a request credentials context) is stricter, because the server is
+ * not next to the agent: local paths and file: URLs are refused (they would read the
+ * server's files) and http(s) URLs may only point at public addresses (no SSRF into the
+ * private network), see ssrf.ts.
  */
 export async function resolveImageSource(
   src: string,
@@ -121,6 +128,16 @@ export async function resolveImageSource(
     };
   }
 
+  const hosted = getRequestCredentials() !== undefined;
+
+  if (hosted && /^https?:\/\//i.test(src)) {
+    const { bytes, url } = await fetchPublicBytes(src, { maxBytes: CONFIG.maxUploadSizeMB * 1024 * 1024 });
+    assertWithinSizeLimit(bytes.byteLength, src);
+    const mimeType = assertSupportedImage(bytes, src);
+    const urlName = basename(url.pathname) || `image${MIME_EXTENSIONS[mimeType] ?? ".png"}`;
+    return { kind: "bytes", bytes, mimeType, suggestedName: decodeURIComponent(urlName) };
+  }
+
   if (/^https?:\/\//i.test(src)) {
     const response = await fetch(src);
     if (!response.ok) {
@@ -131,6 +148,10 @@ export async function resolveImageSource(
     const mimeType = assertSupportedImage(bytes, src);
     const urlName = basename(new URL(src).pathname) || `image${MIME_EXTENSIONS[mimeType] ?? ".png"}`;
     return { kind: "bytes", bytes, mimeType, suggestedName: decodeURIComponent(urlName) };
+  }
+
+  if (hosted) {
+    throw new Error("local file paths are not available on the hosted server; use a URL or data URI");
   }
 
   const filePath = isAbsolute(src) ? src : resolve(baseDir, decodeFilePath(src));
@@ -225,7 +246,7 @@ export async function uploadTaskAttachment(
   const response = await fetch(`https://api.clickup.com/api/v2/task/${taskId}/attachment`, {
     method: "POST",
     headers: {
-      Authorization: CONFIG.apiKey,
+      Authorization: CONFIG.authHeader,
       "Content-Type": contentType,
     },
     body,

@@ -88,7 +88,7 @@ async function fetchTaskTimeEntries(taskId: string): Promise<any[]> {
     }
 
     const response = await fetch(`https://api.clickup.com/api/v2/team/${CONFIG.teamId}/time_entries?${params}`, {
-      headers: { Authorization: CONFIG.apiKey },
+      headers: { Authorization: CONFIG.authHeader },
     });
 
     if (!response.ok) {
@@ -107,7 +107,7 @@ async function fetchTaskTimeEntries(taskId: string): Promise<any[]> {
 async function loadTaskContent(taskId: string): Promise<(ContentBlock | ImageMetadataBlock)[]> {
   const response = await fetch(
     `https://api.clickup.com/api/v2/task/${taskId}?include_markdown_description=true&include_subtasks=true`,
-    { headers: { Authorization: CONFIG.apiKey } }
+    { headers: { Authorization: CONFIG.authHeader } }
   );
   const task = await response.json();
 
@@ -190,7 +190,7 @@ async function loadTaskComments(id: string): Promise<DatedContentEvent[]> {
 async function loadTimeInStatusHistory(taskId: string): Promise<DatedContentEvent[]> {
   const url = `https://api.clickup.com/api/v2/task/${taskId}/time_in_status`;
   try {
-    const response = await fetch(url, { headers: { Authorization: CONFIG.apiKey } });
+    const response = await fetch(url, { headers: { Authorization: CONFIG.authHeader } });
     if (!response.ok) {
       console.error(`Error fetching time in status for task ${taskId}: ${response.status} ${response.statusText}`);
       return [];

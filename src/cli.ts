@@ -180,13 +180,6 @@ async function main() {
       process.exit(1);
     }
     
-    // Mock environment variables for testing if they're not set
-    if (!process.env.CLICKUP_API_KEY || !process.env.CLICKUP_TEAM_ID) {
-      console.warn("Warning: Using mock API credentials. This will not return real data.");
-      process.env.CLICKUP_API_KEY = process.env.CLICKUP_API_KEY || 'test_api_key';
-      process.env.CLICKUP_TEAM_ID = process.env.CLICKUP_TEAM_ID || 'test_team_id';
-    }
-    
     // Call the tool's callback function
     const result = await tool.callback(params);
     console.dir(result.content);
@@ -201,4 +194,7 @@ async function main() {
   }
 }
 
-main().catch(console.error);
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

@@ -2,6 +2,8 @@ import {ContentBlock, ImageMetadataBlock} from "./types";
 import {CONFIG} from "./config";
 import { estimateBase64Size } from "./data-uri";
 import { Buffer } from "buffer";
+import { getRequestCredentials } from "./request-context";
+import { fetchPublicBytes } from "./ssrf";
 
 /**
  * Detect MIME type from image binary data using magic bytes (file signatures)
@@ -125,12 +127,26 @@ function applyCountBasedLimitToImageMetadata(content: (ContentBlock | ImageMetad
  */
 async function downloadSingleImage(imageMetadata: ImageMetadataBlock, perImageBudget: number): Promise<ContentBlock> {
   const fallbackText = createImageFallback(imageMetadata);
+  // The hosted server must not be steerable into its private network by a URL somebody
+  // wrote into a task, so there every download goes through the SSRF guard. A refused or
+  // failed URL is logged and skipped like any other failed download.
+  const hosted = getRequestCredentials() !== undefined;
 
   // Try each URL in order (largest to smallest)
   for (const url of imageMetadata.urls) {
     const abortController = new AbortController();
     
     try {
+      if (hosted) {
+        const { bytes, contentType } = await fetchPublicBytes(url, { maxBytes: Math.floor(perImageBudget) });
+        const imageBuffer = new Uint8Array(bytes).buffer;
+        return {
+          type: "image",
+          mimeType: detectMimeTypeFromBuffer(imageBuffer) || contentType || "image/png",
+          data: bytes.toString("base64"),
+        };
+      }
+
       const response = await fetch(url, {
         signal: abortController.signal
       });

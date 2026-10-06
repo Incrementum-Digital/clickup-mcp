@@ -22,6 +22,8 @@
       "env": {
         "CLICKUP_API_KEY": "${user_config.clickup_api_key}",
         "CLICKUP_TEAM_ID": "${user_config.clickup_team_id}",
+        "CLICKUP_CLIENT_ID": "${user_config.clickup_client_id}",
+        "CLICKUP_CLIENT_SECRET": "${user_config.clickup_client_secret}",
         "CLICKUP_PRIMARY_LANGUAGE": "${user_config.clickup_primary_language}",
         "CLICKUP_COMMENT_EDIT_WINDOW_HOURS": "${user_config.clickup_comment_edit_window_hours}",
         "MAX_UPLOAD_SIZE_MB": "${user_config.max_upload_size_mb}"
@@ -91,15 +93,28 @@
     "clickup_api_key": {
       "type": "string",
       "title": "ClickUp API Key",
-      "description": "Your ClickUp API key. Get it from Profile → Settings → Apps → API Token",
-      "required": true,
+      "description": "Your ClickUp personal API token (Profile → Settings → Apps → API Token). Leave empty to log in with a ClickUp OAuth app instead (see client ID and secret below).",
+      "required": false,
       "sensitive": true
     },
     "clickup_team_id": {
       "type": "string", 
       "title": "ClickUp Team ID",
-      "description": "Your ClickUp Team ID (the 7–10 digit number in the URL when in settings)",
-      "required": true
+      "description": "Your ClickUp Team ID (the 7–10 digit number in the URL when in settings). Optional: if left empty, the workspace is detected automatically when your token is authorized for exactly one.",
+      "required": false
+    },
+    "clickup_client_id": {
+      "type": "string",
+      "title": "ClickUp OAuth Client ID",
+      "description": "Optional. Client ID of a ClickUp OAuth app, as an alternative to the personal API key. Run `npx @hauptsache.net/clickup-mcp auth` once in a terminal to log in. The app's redirect URL must be http://localhost:8787/callback.",
+      "required": false
+    },
+    "clickup_client_secret": {
+      "type": "string",
+      "title": "ClickUp OAuth Client Secret",
+      "description": "Optional. Client secret of the ClickUp OAuth app (used together with the client ID).",
+      "required": false,
+      "sensitive": true
     },
     "clickup_primary_language": {
       "type": "string",

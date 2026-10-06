@@ -1,5 +1,6 @@
 import {CONFIG} from "./config";
 import Fuse from 'fuse.js';
+import {credentialCacheKey} from "./request-context";
 
 const GLOBAL_REFRESH_INTERVAL = 60000; // 60 seconds - that is the rate limit time frame
 
@@ -13,7 +14,8 @@ export function isTaskId(str: string): boolean {
 }
 
 // Cache for current user info to avoid repeated API calls and race conditions
-let cachedUserPromise: Promise<any> | null = null;
+// Keyed by credentialCacheKey() so users of a multi-user server never share entries.
+const cachedUserPromises = new Map<string, Promise<any>>();
 
 /**
  * Get current authenticated user information from ClickUp API
@@ -21,14 +23,16 @@ let cachedUserPromise: Promise<any> | null = null;
  */
 export async function getCurrentUser() {
   // Return cached promise if available
-  if (cachedUserPromise) {
-    return cachedUserPromise;
+  const userKey = credentialCacheKey();
+  const cachedUser = cachedUserPromises.get(userKey);
+  if (cachedUser) {
+    return cachedUser;
   }
 
   // Create the fetch promise
   const fetchPromise = (async () => {
     const userResponse = await fetch("https://api.clickup.com/api/v2/user", {
-      headers: { Authorization: CONFIG.apiKey },
+      headers: { Authorization: CONFIG.authHeader },
     });
 
     if (!userResponse.ok) {
@@ -39,11 +43,11 @@ export async function getCurrentUser() {
   })();
 
   // Cache the promise
-  cachedUserPromise = fetchPromise;
+  cachedUserPromises.set(userKey, fetchPromise);
   
   // Auto-cleanup after 60 seconds
   setTimeout(() => {
-    cachedUserPromise = null;
+    cachedUserPromises.delete(userKey);
     console.error(`Auto-cleaned user data cache`);
   }, GLOBAL_REFRESH_INTERVAL);
   
@@ -63,14 +67,15 @@ export function getSpaceDetails(spaceId: string): Promise<any> {
     return Promise.reject(new Error('Invalid space ID'));
   }
 
-  const cachedSpace = spaceCache.get(spaceId);
+  const cacheKey = `${credentialCacheKey()}:${spaceId}`;
+  const cachedSpace = spaceCache.get(cacheKey);
   if (cachedSpace) {
     return cachedSpace;
   }
 
   const fetchPromise = fetch(
     `https://api.clickup.com/api/v2/space/${spaceId}`,
-    {headers: {Authorization: CONFIG.apiKey}})
+    {headers: {Authorization: CONFIG.authHeader}})
     .then(res => {
       if (!res.ok) {
         throw new Error(`Error fetching space ${spaceId}: ${res.status}`);
@@ -82,7 +87,7 @@ export function getSpaceDetails(spaceId: string): Promise<any> {
       throw new Error(`Error fetching space ${spaceId}: ${error}`);
     });
 
-  spaceCache.set(spaceId, fetchPromise);
+  spaceCache.set(cacheKey, fetchPromise);
   return fetchPromise;
 }
 
@@ -99,11 +104,12 @@ export async function getTaskSearchIndex(
   assignees?: string[]
 ): Promise<Fuse<any> | null> {
   // Create cache key from sorted filter arrays
-  const key = JSON.stringify({
+  const filterKey = JSON.stringify({
     space_ids: space_ids?.sort(),
     list_ids: list_ids?.sort(),
     assignees: assignees?.sort()
   });
+  const key = `${credentialCacheKey()}:${filterKey}`;
 
   // Check for existing valid index promise
   const cachedPromise = taskIndices.get(key);
@@ -113,7 +119,7 @@ export async function getTaskSearchIndex(
 
   // Create the fetch promise
   const fetchPromise = (async (): Promise<Fuse<any>> => {
-    console.error(`Refreshing task index for filters: ${key}`);
+    console.error(`Refreshing task index for filters: ${filterKey}`);
     const tasks = await fetchTasks(space_ids, list_ids, assignees);
     const index = createFuseIndex(tasks);
     console.error(`Task index created with ${tasks.length} tasks`);
@@ -124,7 +130,7 @@ export async function getTaskSearchIndex(
   taskIndices.set(key, fetchPromise);
   setTimeout(() => {
     taskIndices.delete(key);
-    console.error(`Auto-cleaned index for filters: ${key}`);
+    console.error(`Auto-cleaned index for filters: ${filterKey}`);
   }, GLOBAL_REFRESH_INTERVAL);
 
   return fetchPromise;
@@ -158,7 +164,7 @@ async function fetchTasks(
   const taskListsPromises = [...Array(maxPages)].map(async (_, i) => {
     const url = `https://api.clickup.com/api/v2/team/${CONFIG.teamId}/task?${queryString}&page=${i}`;
     try {
-      const res = await fetch(url, {headers: {Authorization: CONFIG.apiKey}});
+      const res = await fetch(url, {headers: {Authorization: CONFIG.authHeader}});
       return await res.json();
     } catch (e) {
       console.error(`Error fetching page ${i}:`, e);
@@ -315,7 +321,7 @@ export function formatSpaceTree(space: any, lists: any[], folders: any[], docume
 }
 
 // Space search index cache - cache promise to prevent race conditions
-let spaceSearchIndexPromise: Promise<Fuse<any> | null> | null = null;
+const spaceSearchIndexPromises = new Map<string, Promise<Fuse<any> | null>>();
 
 /**
  * Get or refresh the space search index
@@ -323,8 +329,10 @@ let spaceSearchIndexPromise: Promise<Fuse<any> | null> | null = null;
  */
 export async function getSpaceSearchIndex(): Promise<Fuse<any> | null> {
   // Return cached promise if available
-  if (spaceSearchIndexPromise) {
-    return spaceSearchIndexPromise;
+  const userKey = credentialCacheKey();
+  const cachedIndex = spaceSearchIndexPromises.get(userKey);
+  if (cachedIndex) {
+    return cachedIndex;
   }
 
   // Create the fetch promise
@@ -332,7 +340,7 @@ export async function getSpaceSearchIndex(): Promise<Fuse<any> | null> {
     try {
       const url = `https://api.clickup.com/api/v2/team/${CONFIG.teamId}/space`;
       const response = await fetch(url, {
-        headers: { Authorization: CONFIG.apiKey },
+        headers: { Authorization: CONFIG.authHeader },
       });
 
       if (!response.ok) {
@@ -359,11 +367,11 @@ export async function getSpaceSearchIndex(): Promise<Fuse<any> | null> {
   })();
 
   // Cache the promise
-  spaceSearchIndexPromise = fetchPromise;
+  spaceSearchIndexPromises.set(userKey, fetchPromise);
 
   // Auto-cleanup after 60 seconds
   setTimeout(() => {
-    spaceSearchIndexPromise = null;
+    spaceSearchIndexPromises.delete(userKey);
     console.error('Auto-cleaned space search index');
   }, GLOBAL_REFRESH_INTERVAL);
 
@@ -377,7 +385,7 @@ const listCache = new Map<string, Promise<any>>(); // Cache for space lists/fold
  * Get lists, folders, and documents for a specific space with caching
  */
 export async function getSpaceContent(spaceId: string): Promise<{ lists: any[], folders: any[], documents: any[] }> {
-  const cacheKey = `space-content-${spaceId}`;
+  const cacheKey = `${credentialCacheKey()}:space-content-${spaceId}`;
   
   // Check cache first
   const cachedContent = listCache.get(cacheKey);
@@ -390,7 +398,7 @@ export async function getSpaceContent(spaceId: string): Promise<{ lists: any[], 
     try {
       const [folders, lists, documents] = await Promise.all([
         fetch(`https://api.clickup.com/api/v2/space/${spaceId}/folder`, {
-          headers: {Authorization: CONFIG.apiKey},
+          headers: {Authorization: CONFIG.authHeader},
         })
           .then(response => response.json())
           .then(json => json.folders || [])
@@ -399,7 +407,7 @@ export async function getSpaceContent(spaceId: string): Promise<{ lists: any[], 
             return []
           }),
         fetch(`https://api.clickup.com/api/v2/space/${spaceId}/list`, {
-          headers: {Authorization: CONFIG.apiKey},
+          headers: {Authorization: CONFIG.authHeader},
         })
           .then(response => response.json())
           .then(json => json.lists || [])
@@ -408,7 +416,7 @@ export async function getSpaceContent(spaceId: string): Promise<{ lists: any[], 
             return []
           }),
         fetch(`https://api.clickup.com/api/v3/workspaces/${CONFIG.teamId}/docs?parent_id=${spaceId}`, {
-          headers: {Authorization: CONFIG.apiKey},
+          headers: {Authorization: CONFIG.authHeader},
         })
           .then(response => response.json())
           .then(json => json.docs || [])
@@ -423,7 +431,7 @@ export async function getSpaceContent(spaceId: string): Promise<{ lists: any[], 
         try {
           const folderListResponse = await fetch(
             `https://api.clickup.com/api/v2/folder/${folder.id}/list`,
-            { headers: { Authorization: CONFIG.apiKey } }
+            { headers: { Authorization: CONFIG.authHeader } }
           );
           if (folderListResponse.ok) {
             const folderListData = await folderListResponse.json();
@@ -459,22 +467,24 @@ export async function getSpaceContent(spaceId: string): Promise<{ lists: any[], 
 }
 
 // Cache for team members to avoid repeated API calls and race conditions
-let cachedTeamMembersPromise: Promise<string[]> | null = null;
+const cachedTeamMembersPromises = new Map<string, Promise<string[]>>();
 
 /**
  * Gets all team members from ClickUp API with caching
  */
 export async function getAllTeamMembers(): Promise<string[]> {
   // Return cached promise if available
-  if (cachedTeamMembersPromise) {
-    return cachedTeamMembersPromise;
+  const userKey = credentialCacheKey();
+  const cachedMembers = cachedTeamMembersPromises.get(userKey);
+  if (cachedMembers) {
+    return cachedMembers;
   }
 
   // Create the fetch promise
   const fetchPromise = (async (): Promise<string[]> => {
     try {
       const response = await fetch(`https://api.clickup.com/api/v2/team`, {
-        headers: { Authorization: CONFIG.apiKey },
+        headers: { Authorization: CONFIG.authHeader },
       });
 
       if (!response.ok) {
@@ -502,11 +512,11 @@ export async function getAllTeamMembers(): Promise<string[]> {
   })();
 
   // Cache the promise
-  cachedTeamMembersPromise = fetchPromise;
+  cachedTeamMembersPromises.set(userKey, fetchPromise);
   
   // Auto-cleanup after 60 seconds
   setTimeout(() => {
-    cachedTeamMembersPromise = null;
+    cachedTeamMembersPromises.delete(userKey);
     console.error(`Auto-cleaned team members cache`);
   }, GLOBAL_REFRESH_INTERVAL);
   

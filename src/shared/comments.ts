@@ -38,7 +38,7 @@ export async function fetchCommentPage(
 
   const response = await fetch(
     `https://api.clickup.com/api/v2/task/${taskId}/comment${query}`,
-    { headers: { Authorization: CONFIG.apiKey } }
+    { headers: { Authorization: CONFIG.authHeader } }
   );
 
   if (!response.ok) {
@@ -135,7 +135,7 @@ export async function fetchCommentReplies(commentId: string): Promise<ExistingCo
   try {
     const response = await fetch(
       `https://api.clickup.com/api/v2/comment/${commentId}/reply`,
-      { headers: { Authorization: CONFIG.apiKey } }
+      { headers: { Authorization: CONFIG.authHeader } }
     );
 
     if (!response.ok) {

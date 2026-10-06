@@ -133,7 +133,7 @@ export function registerSearchTools(server: McpServer, userData: any) {
           try {
             const response = await fetch(
               `https://api.clickup.com/api/v2/task/${id}`,
-              {headers: {Authorization: CONFIG.apiKey}}
+              {headers: {Authorization: CONFIG.authHeader}}
             );
             if (response.ok) {
               const task = await response.json();

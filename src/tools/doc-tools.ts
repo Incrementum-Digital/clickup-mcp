@@ -78,10 +78,10 @@ export function registerDocumentToolsRead(server: McpServer) {
         // First get the document details and page structure
         const [docResponse, pagesResponse] = await Promise.all([
           fetch(`https://api.clickup.com/api/v3/workspaces/${CONFIG.teamId}/docs/${doc_id}`, {
-            headers: { Authorization: CONFIG.apiKey },
+            headers: { Authorization: CONFIG.authHeader },
           }),
           fetch(`https://api.clickup.com/api/v3/workspaces/${CONFIG.teamId}/docs/${doc_id}/pageListing`, {
-            headers: { Authorization: CONFIG.apiKey },
+            headers: { Authorization: CONFIG.authHeader },
           })
         ]);
 
@@ -142,7 +142,7 @@ export function registerDocumentToolsRead(server: McpServer) {
 
         // Get the specific page content
         const pageResponse = await fetch(`https://api.clickup.com/api/v3/workspaces/${CONFIG.teamId}/docs/${doc_id}/pages/${targetPage.id}`, {
-          headers: { Authorization: CONFIG.apiKey },
+          headers: { Authorization: CONFIG.authHeader },
         });
 
         if (!pageResponse.ok) {
@@ -267,7 +267,7 @@ export function registerDocumentToolsWrite(server: McpServer) {
         const response = await fetch(`https://api.clickup.com/api/v3/workspaces/${CONFIG.teamId}/docs/${doc_id}/pages/${page_id}`, {
           method: 'PUT',
           headers: {
-            Authorization: CONFIG.apiKey,
+            Authorization: CONFIG.authHeader,
             'Content-Type': 'application/json',
           },
           body: JSON.stringify(requestBody),
@@ -397,7 +397,7 @@ export function registerDocumentToolsWrite(server: McpServer) {
           const docResponse = await fetch(`https://api.clickup.com/api/v3/workspaces/${CONFIG.teamId}/docs`, {
             method: 'POST',
             headers: {
-              Authorization: CONFIG.apiKey,
+              Authorization: CONFIG.authHeader,
               'Content-Type': 'application/json',
             },
             body: JSON.stringify(docRequestBody),
@@ -420,7 +420,7 @@ export function registerDocumentToolsWrite(server: McpServer) {
           const pageResponse = await fetch(`https://api.clickup.com/api/v3/workspaces/${CONFIG.teamId}/docs/${newDocId}/pages`, {
             method: 'POST',
             headers: {
-              Authorization: CONFIG.apiKey,
+              Authorization: CONFIG.authHeader,
               'Content-Type': 'application/json',
             },
             body: JSON.stringify(pageRequestBody),
@@ -456,7 +456,7 @@ export function registerDocumentToolsWrite(server: McpServer) {
           const response = await fetch(`https://api.clickup.com/api/v3/workspaces/${CONFIG.teamId}/docs/${doc_id}/pages`, {
             method: 'POST',
             headers: {
-              Authorization: CONFIG.apiKey,
+              Authorization: CONFIG.authHeader,
               'Content-Type': 'application/json',
             },
             body: JSON.stringify(pageRequestBody),

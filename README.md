@@ -8,8 +8,8 @@ Model Context Protocol (MCP) server enabling AI assistants to interact with Clic
 
 | Feature              | This MCP                                              | Official ClickUp MCP                        |
 |----------------------|-------------------------------------------------------|---------------------------------------------|
-| **Setup**            | Local npm/npx install                                 | Remote MCP (no install)                     |
-| **Authentication**   | API key only                                          | OAuth only                                  |
+| **Setup**            | Local npm/npx install, or self-hosted remote server   | Remote MCP (no install)                     |
+| **Authentication**   | API key or ClickUp OAuth app (local browser login; remote: per-user ClickUp OAuth) | OAuth only                                  |
 | **Task Context**     | Complete with comments, status history, inline images | Requires mutiple tool calls for full contxt |
 | **Image Support**    | Read and write: inline images with smart size budgeting, and `![](local/path.png)` uploads automatically | Upload via separate tool calls; base64 capped at ~200KB |
 | **Search**           | Fuzzy search on recent tasks (limited scope)          | Full ClickUp search database                |
@@ -27,7 +27,6 @@ Model Context Protocol (MCP) server enabling AI assistants to interact with Clic
 - You want the `read-minimal` mode optimized for development workflows
 
 **Choose Official MCP when:**
-- You need OAuth authentication for enterprise security compliance
 - You need Chat integration or Connected Search features
 - You want official support and no local installation
 
@@ -104,15 +103,84 @@ Turn natural language into powerful ClickUp actions:
 
 ### Prerequisites
 
-For all installation methods, you'll need:
-- Your `CLICKUP_API_KEY` (Profile Icon > Settings > Apps > API Token ~ usually starts with pk_)
-- Your `CLICKUP_TEAM_ID` (The 7–10 digit number in the URL when you are in the settings)
+For all installation methods, you'll need **either**:
+- Your `CLICKUP_API_KEY` (Profile Icon > Settings > Apps > API Token ~ usually starts with pk_) and optionally your `CLICKUP_TEAM_ID` (The 7–10 digit number in the URL when you are in the settings)
+
+**or**:
+- A ClickUp OAuth app (client ID and client secret), see [Authentication](#authentication) below. `CLICKUP_TEAM_ID` is optional when your token is authorized for exactly one workspace.
+
+The examples below use a personal API key; the [Authentication](#authentication) section shows the OAuth variants.
+
+### Authentication
+
+The server supports two ways to authenticate. The token is resolved in this order: `CLICKUP_API_KEY`, then the saved token file, then an interactive OAuth login (when `CLICKUP_CLIENT_ID` and `CLICKUP_CLIENT_SECRET` are set).
+
+#### Option A: Personal API token
+
+Take your token from Profile Icon > Settings > Apps > API Token (usually starts with `pk_`) and set it as `CLICKUP_API_KEY`. See the installation examples below.
+
+#### Option B: ClickUp OAuth app
+
+Create an OAuth app in ClickUp (only workspace owners/admins can create apps, see the [ClickUp authentication docs](https://developer.clickup.com/docs/authentication)):
+
+1. In ClickUp click your avatar > Settings.
+2. In the sidebar under the workspace section open "Integrations" (or "Apps"), then "ClickUp API".
+3. Click "Create an App".
+4. Enter a name and the redirect URL `http://localhost:8787/callback`.
+5. Copy the Client ID and Client Secret.
+
+The redirect URL must be registered on the ClickUp app exactly, including the port. If you change the port with `CLICKUP_OAUTH_PORT`, register the matching URL.
+
+**Claude Code (CLI):**
+```bash
+claude mcp add --scope user clickup \
+  --env CLICKUP_CLIENT_ID=YOUR_CLIENT_ID \
+  --env CLICKUP_CLIENT_SECRET=YOUR_CLIENT_SECRET \
+  -- npx -y @hauptsache.net/clickup-mcp
+```
+
+**Claude Desktop, Windsurf, Cursor and others:**
+```json
+{
+  "mcpServers": {
+    "clickup": {
+      "command": "npx",
+      "args": [
+        "@hauptsache.net/clickup-mcp@latest"
+      ],
+      "env": {
+        "CLICKUP_CLIENT_ID": "your_client_id",
+        "CLICKUP_CLIENT_SECRET": "your_client_secret"
+      }
+    }
+  }
+}
+```
+
+**Log in once in a terminal first** (the client ID and secret must be in the environment of that command):
+```bash
+CLICKUP_CLIENT_ID=YOUR_CLIENT_ID CLICKUP_CLIENT_SECRET=YOUR_CLIENT_SECRET \
+  npx @hauptsache.net/clickup-mcp auth
+```
+
+`auth` opens the browser (and prints the URL to the terminal as well), saves the token and prints `Authenticated as <username> (user_id: ...)` plus the authorized workspaces. MCP hosts such as Claude Desktop start the server in the background and may time out if the first start has to wait for a browser login, so running `auth` once beforehand is the recommended path. If no token is saved and client ID and secret are set, the server still attempts the browser login on start.
+
+To remove the saved token:
+```bash
+npx @hauptsache.net/clickup-mcp logout
+```
+
+Notes:
+- `CLICKUP_TEAM_ID` is optional. If it is unset, the server calls `GET /api/v2/team` and uses the workspace automatically when the token is authorized for exactly one. With several workspaces it stops and lists them as `Name (team_id: 123)` so you can set `CLICKUP_TEAM_ID`.
+- ClickUp OAuth tokens do not expire and there is no refresh token. The token is saved to `~/.config/clickup-mcp/token.json` (override with `CLICKUP_TOKEN_FILE`, written with mode 0600).
+- OAuth tokens are sent as `Authorization: Bearer <token>`; personal tokens are sent as-is.
+- **OAuth does not raise rate limits.** Limits are per token and identical for both token types: 100 requests/minute on Free Forever, Unlimited and Business, 1,000/min on Business Plus, 10,000/min on Enterprise. OAuth helps with team rollout (nobody has to handle a personal token) and gives per-workspace authorization and revocation from the ClickUp app settings.
 
 ### Option 1: MCPB Bundle (Recommended for Claude Desktop)
 
 Download the pre-built bundle from our [releases page](https://github.com/hauptsacheNet/clickup-mcp/releases). This method requires no Node.js installation.
 
-You'll get a configuration screen where you are prompted to enter your API key and team ID.
+You'll get a configuration screen where you are prompted to enter your API key and team ID, or the client ID and secret of a ClickUp OAuth app (all optional, see [Authentication](#authentication)).
 
 ### Option 2: NPX Installation
 
@@ -176,6 +244,71 @@ env = { "CLICKUP_API_KEY" = "YOUR_KEY", "CLICKUP_TEAM_ID" = "YOUR_ID", "CLICKUP_
 
 > Note the `CLICKUP_MCP_MODE=read-minimal`. This is my usage recommendation, but feel free to use one of the other modes.
 
+## Hosting as a Remote MCP Server (Railway)
+
+Besides the local stdio mode, the server can run as a hosted remote MCP server: `node dist/http.js` (npm script `start:http`) serves MCP over Streamable HTTP at `/mcp`, behind an OAuth 2.1 authorization server built into the same process (dynamic client registration, PKCE, refresh tokens). The login step delegates to ClickUp OAuth, so every user connects with their own ClickUp account and their own rate limit; nothing is shared. The stdio mode described above is unchanged.
+
+### Environment variables (hosted mode)
+
+| Variable | Required | Description |
+|----------|:--------:|-------------|
+| `MCP_TOKEN_SECRET` | yes | Seals all tokens (AES-256-GCM). Minimum 32 characters, e.g. `openssl rand -hex 32`. Never auto-generated. |
+| `CLICKUP_CLIENT_ID` | yes | Client ID of your ClickUp OAuth app. |
+| `CLICKUP_CLIENT_SECRET` | yes | Client secret of your ClickUp OAuth app. |
+| `MCP_PUBLIC_URL` | yes | External origin of the server. On Railway it falls back to `https://$RAILWAY_PUBLIC_DOMAIN`. |
+| `PORT` | no | Listen port. Defaults to 3000. |
+| `CLICKUP_TEAM_ID` | no | Workspace gate, see below. |
+| `CLICKUP_MCP_MODE` | no | `read-minimal`, `read` or `write` (default), as in stdio mode. |
+| `MCP_ACCESS_TOKEN_TTL_SECONDS` | no | Access token lifetime. Defaults to 3600. |
+| `MCP_REFRESH_TOKEN_TTL_SECONDS` | no | Refresh token lifetime. Defaults to 30 days. |
+| `MCP_SESSION_IDLE_SECONDS` | no | Idle time before an MCP session is dropped. Defaults to 3600. |
+| `MCP_ALLOWED_REDIRECT_SCHEMES` | no | Extra redirect URI schemes for native MCP clients, comma-separated (e.g. `cursor`). By default only `https://` redirect URIs and `http://localhost` loopback URIs are accepted at client registration. |
+
+### Deploy on Railway
+
+`railway.toml` sets `startCommand = "node dist/http.js"` and `healthcheckPath = "/health"`.
+
+1. Create a Railway service from the GitHub repository.
+2. Set the environment variables above.
+3. Generate a public domain for the service and set `MCP_PUBLIC_URL` to it (or rely on `RAILWAY_PUBLIC_DOMAIN`).
+4. In your ClickUp OAuth app register `https://<MCP_PUBLIC_URL>/oauth/clickup/callback` as the redirect URL. The server prints this exact URL at startup.
+5. Add `https://<domain>/mcp` as a connector (below).
+
+Run a single replica; the server is built for that.
+
+### Connecting
+
+- **claude.ai:** Settings > Connectors > Add custom connector > enter the `/mcp` URL.
+- **Claude Desktop:** the same connector.
+- **Claude Code:** `claude mcp add --transport http clickup https://<host>/mcp`
+
+Each user is sent through a ClickUp login the first time and then uses their own ClickUp token. Rate limits are per ClickUp token, so every connected user gets their own budget (100 requests/minute on Business).
+
+### Workspace gate
+
+With `CLICKUP_TEAM_ID` set, only users who authorized that workspace may connect. Without it, each user must have authorized exactly one workspace.
+
+### Stateless tokens
+
+There is no database. Access tokens, refresh tokens and registered client ids are AES-256-GCM blobs sealed with `MCP_TOKEN_SECRET`; only in-flight logins (10 minutes) and authorization codes (60 seconds) live in memory. Consequences:
+
+- Rotating `MCP_TOKEN_SECRET` logs everyone out.
+- Issued tokens cannot be revoked early. Revoking the app inside ClickUp (avatar > Settings > Apps / Integrations) invalidates the wrapped ClickUp token, which stops it working.
+- A restart clears the in-memory list of used refresh tokens.
+
+### Security notes
+
+- MCP session ids are bound to the user who created them; another user's token gets a 403.
+- Dynamically registered clients may only use `https://` redirect URIs, plus `http://localhost` for Claude Code. Other schemes are rejected unless listed in `MCP_ALLOWED_REDIRECT_SCHEMES`.
+- The ClickUp login is bound to the browser that started it with a cookie, and a consent page shows which MCP client (name and redirect origin) will receive access before the user is sent to ClickUp.
+- Refresh tokens are rotated on every use; a reused refresh token is rejected (the used-token list is in memory, so it resets on restart).
+- On the hosted server, markdown image sources in comments and descriptions must be URLs or data URIs; local file paths are rejected, and URLs that resolve to private, loopback or link-local addresses are refused.
+- The server logs `username (user_id)` and the tool name for every call to stderr, so usage is attributable.
+
+### Endpoints
+
+`/.well-known/oauth-authorization-server`, `/.well-known/oauth-protected-resource`, `/authorize`, `/token`, `/register`, `/oauth/clickup/callback`, `/mcp`, `/health`.
+
 ## MCP Modes & Available Tools
 
 The ClickUp MCP supports three operational modes to balance functionality, security, and performance:
@@ -224,10 +357,14 @@ Add the mode to your MCP configuration:
 
 ## Configuration
 
-This MCP server can be configured using environment variables. In the desktop extension (`.mcpb`) installer, the API key, team ID, primary language, upload size limit and comment edit window are offered as form fields; the remaining variables have to be set on the server environment directly.
+This MCP server can be configured using environment variables. In the desktop extension (`.mcpb`) installer, the API key, team ID, OAuth client ID and secret, primary language, upload size limit and comment edit window are offered as form fields; the remaining variables have to be set on the server environment directly.
 
-- `CLICKUP_API_KEY`: (Required) Your ClickUp API key.
-- `CLICKUP_TEAM_ID`: (Required) Your ClickUp Team ID (formerly Workspace ID).
+- `CLICKUP_API_KEY`: (Optional) Your ClickUp personal API key. Required unless a saved OAuth token exists or `CLICKUP_CLIENT_ID` and `CLICKUP_CLIENT_SECRET` are set.
+- `CLICKUP_TEAM_ID`: (Optional) Your ClickUp Team ID (formerly Workspace ID). If unset, the workspace is detected automatically when the token is authorized for exactly one; with several, the server lists them and asks you to set this.
+- `CLICKUP_CLIENT_ID`: (Optional) Client ID of your ClickUp OAuth app. Together with `CLICKUP_CLIENT_SECRET` this enables OAuth login (see [Authentication](#authentication)).
+- `CLICKUP_CLIENT_SECRET`: (Optional) Client secret of your ClickUp OAuth app.
+- `CLICKUP_OAUTH_PORT`: (Optional) Local port for the OAuth callback. Defaults to 8787. The redirect URL `http://localhost:8787/callback` (with your port) must be registered on the ClickUp app exactly.
+- `CLICKUP_TOKEN_FILE`: (Optional) Where the OAuth token is saved. Defaults to `~/.config/clickup-mcp/token.json` (written with mode 0600).
 - `CLICKUP_MCP_MODE`: (Optional) Controls which tools are available. Options: `read-minimal`, `read`, `write` (default).
 - `MAX_IMAGES`: (Optional) The maximum number of images to return for a task in `getTaskById`. Defaults to 4.
 - `MAX_RESPONSE_SIZE_MB`: (Optional) The maximum response size in megabytes for `getTaskById`. Uses intelligent size budgeting to fit the most important images within the limit. Defaults to 1.
@@ -235,6 +372,15 @@ This MCP server can be configured using environment variables. In the desktop ex
 - `CLICKUP_COMMENT_EDIT_WINDOW_HOURS`: (Optional) How long after creation `editComment` may still rewrite a comment. Defaults to 24. Set to `0` to disable comment editing entirely.
 - `CLICKUP_PRIMARY_LANGUAGE`: (Optional) A hint for the primary language used in your ClickUp tasks (e.g., "de" for German, "en" for English). This helps the `searchTask` tool provide more tailored guidance in its description for multilingual searches.
 - `LANG`: (Optional) If `CLICKUP_PRIMARY_LANGUAGE` is not set, the MCP will check this standard environment variable (e.g., "en_US.UTF-8", "de_DE") as a fallback to infer the primary language.
+
+Hosted mode only (see [Hosting as a Remote MCP Server](#hosting-as-a-remote-mcp-server-railway)); `CLICKUP_CLIENT_ID`, `CLICKUP_CLIENT_SECRET`, `CLICKUP_TEAM_ID` and `CLICKUP_MCP_MODE` apply there too:
+
+- `MCP_TOKEN_SECRET`: (Required) Secret of at least 32 characters that seals all tokens, e.g. `openssl rand -hex 32`. Never auto-generated.
+- `MCP_PUBLIC_URL`: (Required) External origin of the server. Falls back to `https://$RAILWAY_PUBLIC_DOMAIN` on Railway.
+- `PORT`: (Optional) Listen port. Defaults to 3000.
+- `MCP_ACCESS_TOKEN_TTL_SECONDS`: (Optional) Access token lifetime. Defaults to 3600.
+- `MCP_REFRESH_TOKEN_TTL_SECONDS`: (Optional) Refresh token lifetime. Defaults to 30 days.
+- `MCP_SESSION_IDLE_SECONDS`: (Optional) Idle time before an MCP session is dropped. Defaults to 3600.
 
 ### Language-Aware Search Guidance
 

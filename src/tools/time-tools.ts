@@ -112,7 +112,7 @@ export function registerTimeToolsRead(server: McpServer) {
         }
 
         const response = await fetch(`https://api.clickup.com/api/v2/team/${CONFIG.teamId}/time_entries?${params}`, {
-          headers: { Authorization: CONFIG.apiKey },
+          headers: { Authorization: CONFIG.authHeader },
         });
 
         if (!response.ok) {
@@ -358,7 +358,7 @@ export function registerTimeToolsWrite(server: McpServer) {
         const response = await fetch(`https://api.clickup.com/api/v2/team/${CONFIG.teamId}/time_entries`, {
           method: 'POST',
           headers: { 
-            Authorization: CONFIG.apiKey,
+            Authorization: CONFIG.authHeader,
             'Content-Type': 'application/json'
           },
           body: JSON.stringify(requestBody)
