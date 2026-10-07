@@ -1,7 +1,8 @@
-import { clickupFetch } from "./clickup-fetch";
+import { clickupFetch, ClickUpRateLimitError } from "./clickup-fetch";
 import {CONFIG} from "./config";
 import Fuse from 'fuse.js';
 import {credentialCacheKey} from "./request-context";
+import {getWorkspaceMembers} from "./members";
 
 const GLOBAL_REFRESH_INTERVAL = 60000; // 60 seconds - that is the rate limit time frame
 
@@ -89,6 +90,14 @@ export function getSpaceDetails(spaceId: string): Promise<any> {
     });
 
   spaceCache.set(cacheKey, fetchPromise);
+  fetchPromise.catch(() => {
+    if (spaceCache.get(cacheKey) === fetchPromise) {
+      spaceCache.delete(cacheKey);
+    }
+  });
+  setTimeout(() => {
+    if (spaceCache.get(cacheKey) === fetchPromise) spaceCache.delete(cacheKey);
+  }, GLOBAL_REFRESH_INTERVAL);
   return fetchPromise;
 }
 
@@ -99,9 +108,17 @@ const taskIndices: Map<string, Promise<TaskSearchResult>> = new Map();
 export const TASK_PAGE_SIZE = 100;
 /** Pages fetched per search. The rate limit is 100 requests/minute per token, so keep this small. */
 export const TASK_MAX_PAGES = 5;
-/** Pages fetched in parallel by the legacy (pre-filter) search path, unfiltered / scoped by space, list or assignee. */
+/** Page caps of the legacy (pre-filter) search path, unfiltered / scoped by space, list or assignee. */
 export const LEGACY_MAX_PAGES = 30;
 export const LEGACY_SCOPED_MAX_PAGES = 10;
+/** The legacy path fetches page 0 alone, then this many pages in parallel per wave while the last page of a wave is still full. */
+export const LEGACY_PAGE_WAVE = 5;
+/**
+ * Task descriptions are cut to this many characters before fuzzy indexing. Fuse search time grows
+ * linearly with text length and blocks the event loop; full descriptions of 3000 tasks made a
+ * 3-term search take over a second and the cached index several MB. Nothing renders text_content.
+ */
+export const TEXT_CONTENT_INDEX_CHARS = 1000;
 
 export type TaskOrderBy = 'id' | 'created' | 'updated' | 'due_date';
 
@@ -214,8 +231,9 @@ export function buildTaskQueryParams(filters: TaskFilters): string[] {
  *
  * mode "filtered" (default): sequential, capped at TASK_MAX_PAGES pages, stops at a short page.
  * mode "legacy": the original deep fetch used when only the pre-existing filters
- * (space_ids, list_ids, assignees) are set - up to LEGACY_MAX_PAGES pages in parallel so a pure
- * text search can match across thousands of recently updated tasks.
+ * (space_ids, list_ids, assignees) are set - up to LEGACY_MAX_PAGES pages, fetched in waves of
+ * LEGACY_PAGE_WAVE that stop at the first short page, so a pure text search can match across
+ * thousands of recently updated tasks without requesting pages that do not exist.
  */
 export async function getTaskSearchIndex(
   filters: TaskFilters = {},
@@ -244,9 +262,14 @@ export async function getTaskSearchIndex(
     const fetched = mode === 'legacy'
       ? await fetchTasksLegacy(queryString, !!(filters.space_ids?.length || filters.list_ids?.length || filters.assignees?.length))
       : await fetchTasks(queryString);
-    const index = createFuseIndex(fetched.tasks);
-    console.error(`Task index created with ${fetched.tasks.length} tasks (${fetched.pagesFetched} page(s))`);
-    return {...fetched, index};
+    const tasks = fetched.tasks.map((task: any) =>
+      typeof task?.text_content === 'string' && task.text_content.length > TEXT_CONTENT_INDEX_CHARS
+        ? {...task, text_content: task.text_content.slice(0, TEXT_CONTENT_INDEX_CHARS)}
+        : task
+    );
+    const index = createFuseIndex(tasks);
+    console.error(`Task index created with ${tasks.length} tasks (${fetched.pagesFetched} page(s))`);
+    return {...fetched, tasks, index};
   })();
 
   // Store promise with auto-cleanup
@@ -261,29 +284,68 @@ export async function getTaskSearchIndex(
 }
 
 /**
- * Original deep fetch: all pages requested in parallel (30 pages unfiltered, 10 when scoped by
- * space/list/assignee). Failed pages count as empty, as before.
+ * Original deep fetch (30 pages unfiltered, 10 when scoped by space/list/assignee), now in waves:
+ * page 0 alone, then LEGACY_PAGE_WAVE pages in parallel while the last page of the previous wave
+ * was still full. Paging ends at the first short page (or `last_page`), so a small workspace costs
+ * one request instead of 30. Errors follow fetchTasks: a rate-limit error always propagates, any
+ * other error on page 0 throws, and a later page failure sets `warning` and stops further waves.
+ * `pagesFetched` counts the pages actually requested.
  */
 async function fetchTasksLegacy(queryString: string, scoped: boolean): Promise<Omit<TaskSearchResult, 'index'>> {
   const maxPages = scoped ? LEGACY_SCOPED_MAX_PAGES : LEGACY_MAX_PAGES;
-  const taskLists = await Promise.all([...Array(maxPages)].map(async (_, i) => {
-    const url = `https://api.clickup.com/api/v2/team/${CONFIG.teamId}/task?${queryString}&page=${i}`;
-    try {
-      const res = await clickupFetch(url, {headers: {Authorization: CONFIG.authHeader}});
-      if (!res.ok) {
-        throw new Error(`ClickUp API error ${res.status} ${res.statusText}`);
-      }
-      return await res.json();
-    } catch (e) {
-      console.error(`Error fetching page ${i}:`, e);
-      return {tasks: []};
+  const tasks: any[] = [];
+  let pagesFetched = 0;
+  let pageCapReached = false;
+  let warning: string | undefined;
+
+  const fetchPage = async (page: number): Promise<any> => {
+    const url = `https://api.clickup.com/api/v2/team/${CONFIG.teamId}/task?${queryString}&page=${page}`;
+    const res = await clickupFetch(url, {headers: {Authorization: CONFIG.authHeader}});
+    if (!res.ok) {
+      const body: any = await res.json().catch(() => ({}));
+      throw new Error(`ClickUp API error ${res.status}${body?.err ? `: ${body.err}` : ''}`);
     }
-  }));
-  return {
-    tasks: taskLists.flatMap(taskList => taskList.tasks || []),
-    pagesFetched: maxPages,
-    pageCapReached: false,
+    return await res.json();
   };
+
+  let nextPage = 0;
+  while (nextPage < maxPages) {
+    const waveSize = nextPage === 0 ? 1 : Math.min(LEGACY_PAGE_WAVE, maxPages - nextPage);
+    const pageNumbers = Array.from({length: waveSize}, (_, i) => nextPage + i);
+    const settled = await Promise.allSettled(pageNumbers.map(fetchPage));
+    pagesFetched += waveSize;
+
+    // Rate-limit errors are never swallowed, whichever page of the wave hit them.
+    for (const result of settled) {
+      if (result.status === 'rejected' && result.reason instanceof ClickUpRateLimitError) throw result.reason;
+    }
+
+    let endOfResults = false;
+    settled.forEach((result, i) => {
+      const page = pageNumbers[i];
+      if (result.status === 'rejected') {
+        if (page === 0) throw result.reason;
+        console.error(`Error fetching page ${page}:`, result.reason);
+        if (!warning) {
+          const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
+          warning = `Fetching page ${page + 1} failed (${reason}), so the results are incomplete.`;
+        }
+        endOfResults = true;
+        return;
+      }
+      const body = result.value;
+      const pageTasks: any[] = body.tasks || [];
+      tasks.push(...pageTasks);
+      const full = pageTasks.length >= TASK_PAGE_SIZE && body.last_page !== true;
+      if (!full) endOfResults = true;
+      else if (page === maxPages - 1) pageCapReached = true;
+    });
+
+    if (endOfResults) break;
+    nextPage += waveSize;
+  }
+
+  return {tasks, pagesFetched, pageCapReached, warning};
 }
 
 /**
@@ -593,8 +655,11 @@ export async function getSpaceContent(spaceId: string): Promise<{ lists: any[], 
           })
       ]);
 
-      // For each folder, also fetch its lists
+      // The folder response embeds each folder's lists; only fetch them when missing
       const folderListPromises = folders.map(async (folder: any) => {
+        if (Array.isArray(folder.lists)) {
+          return folder;
+        }
         try {
           const folderListResponse = await clickupFetch(
             `https://api.clickup.com/api/v2/folder/${folder.id}/list`,
@@ -663,61 +728,18 @@ export function getSpaceHierarchy(spaceId: string): Promise<{ lists: any[], fold
   return promise;
 }
 
-// Cache for team members to avoid repeated API calls and race conditions
-const cachedTeamMembersPromises = new Map<string, Promise<string[]>>();
-
 /**
- * Gets all team members from ClickUp API with caching
+ * Gets all team member ids. Shares the cached `GET /team` request of getWorkspaceMembers.
+ * Never throws: returns [] on any failure.
  */
 export async function getAllTeamMembers(): Promise<string[]> {
-  // Return cached promise if available
-  const userKey = credentialCacheKey();
-  const cachedMembers = cachedTeamMembersPromises.get(userKey);
-  if (cachedMembers) {
-    return cachedMembers;
+  try {
+    const members = await getWorkspaceMembers();
+    return members.map(m => m.id);
+  } catch (error) {
+    console.error('Error fetching team members:', error);
+    return [];
   }
-
-  // Create the fetch promise
-  const fetchPromise = (async (): Promise<string[]> => {
-    try {
-      const response = await clickupFetch(`https://api.clickup.com/api/v2/team`, {
-        headers: { Authorization: CONFIG.authHeader },
-      });
-
-      if (!response.ok) {
-        console.error(`Error fetching teams: ${response.status} ${response.statusText}`);
-        return [];
-      }
-
-      const data = await response.json();
-      if (!data.teams || !Array.isArray(data.teams)) {
-        return [];
-      }
-
-      // Find the team that matches our configured team ID and extract all user IDs
-      const currentTeam = data.teams.find((team: any) => team.id === CONFIG.teamId);
-      if (!currentTeam || !currentTeam.members || !Array.isArray(currentTeam.members)) {
-        console.error(`Team ${CONFIG.teamId} not found or has no members`);
-        return [];
-      }
-
-      return currentTeam.members.map((member: any) => member.user?.id).filter(Boolean);
-    } catch (error) {
-      console.error('Error fetching team members:', error);
-      return [];
-    }
-  })();
-
-  // Cache the promise
-  cachedTeamMembersPromises.set(userKey, fetchPromise);
-  
-  // Auto-cleanup after 60 seconds
-  setTimeout(() => {
-    cachedTeamMembersPromises.delete(userKey);
-    console.error(`Auto-cleaned team members cache`);
-  }, GLOBAL_REFRESH_INTERVAL);
-  
-  return fetchPromise;
 }
 
 /**

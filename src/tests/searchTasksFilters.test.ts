@@ -263,7 +263,7 @@ test("searchTasks warns when a later page fails", async (t) => {
 test("searchTasks keeps the deep legacy fetch when no new filter is set", async (t) => {
   const { tools, requests, done } = await setup(t, (_p, page) => ({ body: { tasks: fullPage(`l${page}_`) } }));
 
-  // Pure terms search: 30 pages requested in parallel, even though every page is full
+  // Pure terms search: every page is full, so the waves run all the way to the 30-page cap
   const result = await tools.searchTasks({ terms: ["l29_99"] });
   assert.equal(requests.length, 30, "legacy path requests 30 pages, not 5");
   assert.ok(requests.every((r) => r.includes("order_by=updated") && r.includes("subtasks=true")));
@@ -271,7 +271,7 @@ test("searchTasks keeps the deep legacy fetch when no new filter is set", async 
   assert.equal(pages.size, 30);
   const text = textOf(result);
   assert.ok(text.includes("Fetched 3000 task(s)"));
-  assert.ok(!text.includes("Page cap reached"));
+  assert.ok(text.includes("Page cap reached: only the first 3000 matching tasks were fetched"));
   assert.ok(text.includes("task_id: l29_99"), "text match found on a task far beyond the 5th page");
 
   // Scoped by a pre-existing filter only: legacy depth of 10 pages

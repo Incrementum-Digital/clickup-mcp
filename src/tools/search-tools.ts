@@ -259,7 +259,7 @@ export function registerSearchTools(server: McpServer, userData: any) {
       ];
       if (searchResult.pageCapReached) {
         summaryLines.push(
-          `Page cap reached: only the first ${TASK_MAX_PAGES * TASK_PAGE_SIZE} matching tasks were fetched, so the results may be incomplete` +
+          `Page cap reached: only the first ${searchResult.tasks.length} matching tasks were fetched, so the results may be incomplete` +
           `${searchTerms.length ? " and the search terms were only matched against those tasks" : ""}. ` +
           `Narrow the search (more filters, a tighter date range, specific list_ids) to see the rest.`
         );

@@ -27,17 +27,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`searchDocuments`** (read and write modes). Fuzzy search over document names from the workspace docs listing, with optional `space_id` filter on the doc's direct parent; capped at 10 pages and cached for 60 seconds.
 
 ### Fixed
+- **Text searches no longer hide ClickUp rate-limit errors.** The deep `searchTasks` path turned every failed page, including a rate-limit error, into an empty page and reported "No tasks found". A rate-limit error now fails the search with the `ClickUp rate limit reached … Retry after Ns` message, like every other tool, and a failure on page 0 is reported as an error.
 - **Bursts of tool calls no longer crash on ClickUp's rate limit.** 24 parallel `getTaskById` calls exceeded the 100 requests/minute per-user limit; the 429 error body was parsed as a task and the tool failed with `Cannot read properties of undefined (reading 'status')`, then kept issuing follow-up requests with an undefined task id. All ClickUp calls now go through one wrapper that caps in-flight requests per user (`CLICKUP_MAX_CONCURRENT_REQUESTS`, default 6, FIFO queue), waits for ClickUp's `Retry-After`/`X-RateLimit-Reset` and retries up to twice when the wait is at most `CLICKUP_RATE_LIMIT_MAX_WAIT_SECONDS` (default 20), pauses that user's queued calls until the reset, and otherwise returns a `ClickUp rate limit reached … Retry after Ns` error. `getTaskById` checks the task response before parsing (404 → not found, 429 → the rate-limit message) and skips comments, time-in-status, time-entries and space requests when the task fetch failed; those loaders also surface rate-limit errors instead of silently returning empty data.
 
 ### Changed
+- **Text searches fetch pages in waves instead of 30 pages at once.** The deep `searchTasks` path (used when only `terms`, `space_ids`, `list_ids` or `assignees` are set) now fetches page 0 alone, then 5 pages at a time while the last page of a wave is still full (cap 30 pages, 10 when scoped), and stops at the first short page. A workspace or scope with fewer than 100 matching tasks costs 1 request instead of 30, which matters with the 100 requests/minute limit. `pagesFetched` now reports the pages actually requested, and `pageCapReached` is set only when the last allowed page was still full. A non-rate-limit failure on a later page now adds an incomplete-results warning (like the filtered path) instead of silently counting as an empty page.
 - `CLICKUP_API_KEY` and `CLICKUP_TEAM_ID` are now optional (also in the MCPB `manifest.json` form). The missing-credentials error is now raised at server startup instead of at module load.
 - `engines.node` is now `>=18`. New runtime dependencies `express` and `cors`.
 - README: updated the Search and Time Tracking rows of the comparison table. `searchDocuments` exists again (see Added), so its tools-table row is back.
 - `searchSpaces` without `terms` now lists every non-archived space with its folders, the lists inside them and folderless lists, but not documents (use `searchDocuments`). It works within a budget of about 40 ClickUp requests per call: roughly the first 19 spaces are expanded, any further spaces are listed by name and id only and the response says the result is partial.
 - `getTaskById` takes the optional `include_time_in_status` parameter.
+- **Task descriptions are truncated to 1,000 characters in the search index.** `getTaskSearchIndex` cuts `text_content` before building the fuzzy index (`TEXT_CONTENT_INDEX_CHARS`). Fuse search time is linear in text length; this cuts a 3-term search over 3,000 long tasks from about 1.1 s to about 0.3 s and shrinks the cached index. No tool output shows `text_content`.
+- **`searchSpaces` no longer requests each folder's lists separately.** `getSpaceContent` uses the `lists` that `GET /space/{id}/folder` already embeds and only calls `GET /folder/{id}/list` for a folder without them, saving one request per folder.
+- **One shared cache for `GET /team`.** `getAllTeamMembers` now wraps `getWorkspaceMembers`, so member lookups and assignee resolution issue one team request per minute instead of two. Team ids are compared as strings.
 
 ### Fixed
 - **Dependency removal in `updateTask` now works.** It reads the task's `dependencies` field, so existing dependencies are found and can be removed.
+- **Space details cache now expires.** `getSpaceDetails` kept every result and every failed request forever; entries now expire after 60 seconds and a rejected request is evicted immediately, like the other caches.
 
 ## [1.9.0] - 2026-09-04
 
