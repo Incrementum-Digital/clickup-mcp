@@ -3,7 +3,7 @@ import { CONFIG } from "./shared/config";
 import {getCurrentUser, getSpaceSearchIndex} from "./shared/utils";
 
 // Import tool registration functions
-import { registerTaskToolsRead } from "./tools/task-tools";
+import { registerTaskToolsRead, registerTaskToolsExtra } from "./tools/task-tools";
 import { registerTaskToolsWrite } from "./tools/task-write-tools";
 import { registerSearchTools } from "./tools/search-tools";
 import { registerSpaceTools } from "./tools/space-tools";
@@ -12,6 +12,8 @@ import { registerTimeToolsRead, registerTimeToolsWrite } from "./tools/time-tool
 import { registerDocumentToolsRead, registerDocumentToolsWrite } from "./tools/doc-tools";
 import { registerWorkspaceTools } from "./tools/workspace-tools";
 import { registerTaskAdminTools } from "./tools/task-admin-tools";
+import { registerHierarchyToolsRead, registerHierarchyToolsWrite } from "./tools/hierarchy-tools";
+import { registerAttachmentToolsRead, registerAttachmentToolsWrite } from "./tools/attachment-tools";
 import { registerSpaceResources } from "./resources/space-resources";
 
 /**
@@ -104,16 +106,20 @@ Use the ClickUp search tools to find tasks assigned to me, and get detailed info
   } else if (CONFIG.mode === 'read') {
     // All read-only tools
     registerTaskToolsRead(server, userData);
+    registerTaskToolsExtra(server);
     registerSearchTools(server, userData);
     registerSpaceTools(server);
     registerSpaceResources(server);
     registerListToolsRead(server);
+    registerHierarchyToolsRead(server);
     registerTimeToolsRead(server);
     registerDocumentToolsRead(server);
+    registerAttachmentToolsRead(server);
     registerWorkspaceTools(server);
   } else if (CONFIG.mode === 'write') {
     // All tools (full functionality)
     registerTaskToolsRead(server, userData);
+    registerTaskToolsExtra(server);
     registerTaskToolsWrite(server, userData);
     registerTaskAdminTools(server);
     registerSearchTools(server, userData);
@@ -121,10 +127,14 @@ Use the ClickUp search tools to find tasks assigned to me, and get detailed info
     registerSpaceResources(server);
     registerListToolsRead(server);
     registerListToolsWrite(server);
+    registerHierarchyToolsRead(server);
+    registerHierarchyToolsWrite(server);
     registerTimeToolsRead(server);
     registerTimeToolsWrite(server);
     registerDocumentToolsRead(server);
     registerDocumentToolsWrite(server);
+    registerAttachmentToolsRead(server);
+    registerAttachmentToolsWrite(server);
     registerWorkspaceTools(server);
   }
 

@@ -1,13 +1,16 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { ContentBlock } from "../shared/types";
-import { getSpaceSearchIndex, getSpaceContent, performMultiTermSearch, formatSpaceTree } from "../shared/utils";
+import { getSpaceSearchIndex, getSpaceContent, getSpaceHierarchy, generateSpaceUrl, performMultiTermSearch, formatSpaceTree } from "../shared/utils";
+
+const HIERARCHY_REQUEST_BUDGET = 40;
 
 export function registerSpaceTools(server: McpServer) {
   server.tool(
     "searchSpaces",
     [
       "Searches spaces (sometimes called projects) by name or ID with fuzzy matching.",
+      "Without terms it returns the whole hierarchy: every non-archived space with its folders and lists (ids and URLs; no documents), within a budget of 40 API requests per call (about 19 spaces expanded; the rest are listed by name and marked partial).",
       "If 5 or fewer spaces match, automatically fetches all lists (sometimes called boards) and folders within those spaces to provide a complete tree structure.",
       "If more than 5 spaces match, returns only space information with guidance to search more precisely.",
       "You can search by space name (fuzzy matching) or provide an exact space ID.",
@@ -17,7 +20,7 @@ export function registerSpaceTools(server: McpServer) {
       terms: z
         .array(z.string())
         .optional()
-        .describe("Array of search terms to match against space names or IDs. If not provided, returns all spaces."),
+        .describe("Array of search terms to match against space names or IDs. If not provided, returns the folder and list hierarchy of all spaces (partial beyond about 19 spaces)."),
       archived: z.boolean().optional().describe("Include archived spaces (default: false)")
     },
     {
@@ -54,6 +57,42 @@ export function registerSpaceTools(server: McpServer) {
         if (matchingSpaces.length === 0) {
           return {
             content: [{ type: "text", text: "No spaces found matching the search criteria." }],
+          };
+        }
+
+        if (!terms || terms.length === 0) {
+          // Whole hierarchy within a shared request budget: the space list (1) plus 2 per space
+          const maxExpanded = Math.floor((HIERARCHY_REQUEST_BUDGET - 1) / 2);
+          const expanded = matchingSpaces.slice(0, maxExpanded);
+          const skipped = matchingSpaces.slice(maxExpanded);
+          const results = await Promise.all(expanded.map(async (space: any) => {
+            try {
+              const { lists, folders } = await getSpaceHierarchy(space.id);
+              return { space, text: formatSpaceTree(space, lists, folders, []).replace(", 0 documents", ""), failed: false };
+            } catch (error) {
+              console.error(`Error fetching content for space ${space.id}:`, error);
+              return { space, text: "", failed: true };
+            }
+          }));
+          const failed = results.filter((r) => r.failed).map((r) => r.space);
+          const unlisted = [...failed, ...skipped];
+          const header = [
+            unlisted.length === 0
+              ? `Found ${matchingSpaces.length} space(s) with complete folder and list hierarchy. Documents are not included here: use searchDocuments.`
+              : `PARTIAL result: found ${matchingSpaces.length} space(s), but only ${results.length - failed.length} could be expanded (budget of ${HIERARCHY_REQUEST_BUDGET} API requests per call). Documents are not included here: use searchDocuments.`,
+            ...(unlisted.length > 0
+              ? [`Spaces listed WITHOUT their folders and lists (${unlisted.length}): use searchSpaces with their names as terms to see their contents.`]
+              : []),
+          ].join("\n");
+          const bare = unlisted.map((space: any) =>
+            `🏢 SPACE: ${space.name} (space_id: ${space.id}${space.private ? ', private' : ''}) ${generateSpaceUrl(space.id)} - contents not loaded`
+          );
+          return {
+            content: [
+              { type: "text" as const, text: header },
+              ...results.filter((r) => !r.failed).map((r) => ({ type: "text" as const, text: r.text })),
+              ...(bare.length ? [{ type: "text" as const, text: bare.join("\n") }] : []),
+            ],
           };
         }
 

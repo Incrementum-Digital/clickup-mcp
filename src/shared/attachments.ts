@@ -43,6 +43,9 @@ interface ResolvedExisting {
 
 export type ResolvedImageSource = ResolvedBytes | ResolvedExisting;
 
+/** Why local paths are refused on the hosted server (shared by the image and file pipelines) */
+export const HOSTED_LOCAL_PATH_ERROR = "local file paths are not available on the hosted server; use a URL or data URI";
+
 const MIME_EXTENSIONS: Record<string, string> = {
   "image/png": ".png",
   "image/jpeg": ".jpg",
@@ -68,7 +71,7 @@ function assertSupportedImage(bytes: Buffer, source: string): string {
   return detected;
 }
 
-function assertWithinSizeLimit(byteLength: number, source: string): void {
+export function assertWithinSizeLimit(byteLength: number, source: string): void {
   const limit = CONFIG.maxUploadSizeMB * 1024 * 1024;
   if (byteLength > limit) {
     throw new Error(
@@ -151,7 +154,7 @@ export async function resolveImageSource(
   }
 
   if (hosted) {
-    throw new Error("local file paths are not available on the hosted server; use a URL or data URI");
+    throw new Error(HOSTED_LOCAL_PATH_ERROR);
   }
 
   const filePath = isAbsolute(src) ? src : resolve(baseDir, decodeFilePath(src));
@@ -173,7 +176,7 @@ export async function resolveImageSource(
  * Markdown writers tend to percent-encode spaces in paths (`my%20shot.png`).
  * Decode them, but leave the path alone if it is not valid encoding.
  */
-function decodeFilePath(src: string): string {
+export function decodeFilePath(src: string): string {
   try {
     return decodeURIComponent(src);
   } catch {

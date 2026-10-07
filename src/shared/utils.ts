@@ -620,6 +620,36 @@ export async function getSpaceContent(spaceId: string): Promise<{ lists: any[], 
   return fetchPromise;
 }
 
+const spaceHierarchyCache = new Map<string, Promise<{ lists: any[], folders: any[] }>>();
+
+/**
+ * Folders (each with its embedded lists) and folderless lists of a space: exactly 2 requests,
+ * cached per user as a promise. Failures throw (and are not cached) so callers can report them.
+ */
+export function getSpaceHierarchy(spaceId: string): Promise<{ lists: any[], folders: any[] }> {
+  const cacheKey = `${credentialCacheKey()}:space-hierarchy-${spaceId}`;
+  const cached = spaceHierarchyCache.get(cacheKey);
+  if (cached) return cached;
+
+  const get = async (path: string, field: string): Promise<any[]> => {
+    const response = await fetch(`https://api.clickup.com/api/v2/space/${spaceId}/${path}`, {
+      headers: { Authorization: CONFIG.authHeader },
+    });
+    if (!response.ok) {
+      throw new Error(`Error fetching ${path}s of space ${spaceId}: ${response.status} ${response.statusText}`);
+    }
+    const json = await response.json();
+    return json[field] || [];
+  };
+
+  const promise = Promise.all([get("folder", "folders"), get("list", "lists")])
+    .then(([folders, lists]) => ({ folders, lists }));
+  spaceHierarchyCache.set(cacheKey, promise);
+  promise.catch(() => spaceHierarchyCache.delete(cacheKey));
+  setTimeout(() => spaceHierarchyCache.delete(cacheKey), GLOBAL_REFRESH_INTERVAL);
+  return promise;
+}
+
 // Cache for team members to avoid repeated API calls and race conditions
 const cachedTeamMembersPromises = new Map<string, Promise<string[]>>();
 
@@ -748,4 +778,63 @@ export async function performMultiTermSearch<T>(
   return Array.from(uniqueResults.values())
     .sort((a, b) => a.score - b.score)
     .map(entry => entry.item);
+}
+
+// Workspace document listing cache - cache promise to prevent race conditions
+const workspaceDocsPromises = new Map<string, Promise<{ docs: any[], capped: boolean }>>();
+const DOCS_PAGE_SIZE = 100;
+export const DOCS_MAX_PAGES = 10;
+
+/**
+ * Lists workspace documents via the v3 docs API (cursor paged, capped at DOCS_MAX_PAGES requests).
+ * Optionally restricted to a space. Caches the promise per user for 60 s; failed fetches are not kept.
+ */
+export async function getWorkspaceDocs(spaceId?: string): Promise<{ docs: any[], capped: boolean }> {
+  const cacheKey = `${credentialCacheKey()}:workspace-docs:${spaceId ?? 'all'}`;
+  const cached = workspaceDocsPromises.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  const fetchPromise = (async () => {
+    const docs: any[] = [];
+    let cursor: string | undefined;
+    let capped = false;
+    for (let page = 0; page < DOCS_MAX_PAGES; page++) {
+      const params = new URLSearchParams({ limit: String(DOCS_PAGE_SIZE) });
+      if (spaceId) {
+        params.set('parent_id', spaceId);
+        params.set('parent_type', 'SPACE');
+      }
+      if (cursor) {
+        params.set('next_cursor', cursor);
+      }
+      const response = await fetch(`https://api.clickup.com/api/v3/workspaces/${CONFIG.teamId}/docs?${params.toString()}`, {
+        headers: { Authorization: CONFIG.authHeader },
+      });
+      if (!response.ok) {
+        throw new Error(`Error fetching documents: ${response.status} ${response.statusText}`);
+      }
+      const json: any = await response.json();
+      docs.push(...(Array.isArray(json.docs) ? json.docs : []));
+      cursor = json.next_cursor || undefined;
+      if (!cursor) {
+        break;
+      }
+      if (page === DOCS_MAX_PAGES - 1) {
+        capped = true;
+      }
+    }
+    return { docs, capped };
+  })();
+
+  workspaceDocsPromises.set(cacheKey, fetchPromise);
+  fetchPromise.catch(() => workspaceDocsPromises.delete(cacheKey));
+
+  setTimeout(() => {
+    workspaceDocsPromises.delete(cacheKey);
+    console.error('Auto-cleaned workspace docs cache');
+  }, GLOBAL_REFRESH_INTERVAL);
+
+  return fetchPromise;
 }

@@ -3,7 +3,8 @@ import { z } from "zod";
 import { convertMarkdownToToolCallResult, convertClickUpTextItemsToToolCallResult } from "../clickup-text";
 import { ContentBlock, DatedContentEvent, ImageMetadataBlock } from "../shared/types";
 import { CONFIG } from "../shared/config";
-import { isTaskId, getSpaceDetails, getSpaceNameFromIndex, getAllTeamMembers } from "../shared/utils";
+import { assertSafeId } from "../shared/ids";
+import { generateTaskUrl, isTaskId, getSpaceDetails, getSpaceNameFromIndex, getAllTeamMembers } from "../shared/utils";
 import { downloadImages } from "../shared/image-processing";
 import { ExistingComment, fetchAllTopLevelComments, fetchRepliesByComment } from "../shared/comments";
 
@@ -28,17 +29,22 @@ export function registerTaskToolsRead(server: McpServer, userData: any) {
         .describe(
           `The 6-16 character ID of the task to get without a prefix like "#", "CU-" or "https://app.clickup.com/t/"`
         ),
+      include_time_in_status: z
+        .boolean()
+        .optional()
+        .describe("Set true to append a 'Time in status' section (how long the task spent in each status). Default false. For several tasks at once use getTimeInStatus."),
     },
     {
       readOnlyHint: true
     },
-    async ({ id }) => {
+    async ({ id, include_time_in_status }) => {
       // 1. Load base task content, comment events, and status change events in parallel
-      const [taskDetailContentBlocks, commentEvents, statusChangeEvents] = await Promise.all([
+      const [taskDetailContentBlocks, commentEvents, timeInStatus] = await Promise.all([
         loadTaskContent(id), // Returns Promise<ContentBlock[]>
         loadTaskComments(id), // Returns Promise<DatedContentEvent[]>
-        loadTimeInStatusHistory(id), // Returns Promise<DatedContentEvent[]>
+        loadTimeInStatusHistory(id), // Returns events plus the raw response (one request serves both)
       ]);
+      const statusChangeEvents = timeInStatus.events;
 
       // 2. Combine comment and status change events
       const allDatedEvents: DatedContentEvent[] = [...commentEvents, ...statusChangeEvents];
@@ -59,6 +65,17 @@ export function registerTaskToolsRead(server: McpServer, userData: any) {
       // 5. Combine task details with processed event blocks
       const allContentBlocks: (ContentBlock | ImageMetadataBlock)[] = [...taskDetailContentBlocks, ...processedEventBlocks];
 
+      // The time-in-status response was already fetched for the status history above,
+      // so the optional section costs no extra request.
+      if (include_time_in_status) {
+        allContentBlocks.push({
+          type: "text",
+          text: timeInStatus.data
+            ? `Time in status:\n${renderTimeInStatus(timeInStatus.data)}`
+            : "Time in status: could not be loaded.",
+        });
+      }
+
       // 6. Download images with smart size limiting
       const limitedContent: ContentBlock[] = await downloadImages(allContentBlocks);
 
@@ -68,6 +85,116 @@ export function registerTaskToolsRead(server: McpServer, userData: any) {
     }
   );
 
+}
+
+/**
+ * Read tools beyond getTaskById. Kept out of registerTaskToolsRead so the
+ * read-minimal mode (getTaskById + searchTasks only) does not pick them up.
+ */
+export function registerTaskToolsExtra(server: McpServer) {
+  server.tool(
+    "getTimeInStatus",
+    [
+      "Shows how long tasks spent in each status: the current status with the time spent so far, plus the status history in order with the time spent in each status.",
+      "Accepts 1 to 100 task IDs. One ID uses the single-task endpoint, several use the bulk endpoint (one API call per 100 tasks)."
+    ].join("\n"),
+    {
+      task_ids: z
+        .array(z.string().min(1))
+        .min(1)
+        .max(100)
+        .describe("The IDs of the tasks to report on (1 to 100)"),
+    },
+    {
+      readOnlyHint: true
+    },
+    async ({ task_ids }) => {
+      try {
+        const ids = Array.from(new Set(task_ids.map(id => assertSafeId(id, "task_id"))));
+        const byTask = await fetchTimeInStatus(ids);
+        const sections = ids.map(id => {
+          const data = byTask[id];
+          return data
+            ? `Task ${id} (task_id: ${id}) - ${generateTaskUrl(id)}\n${renderTimeInStatus(data)}`
+            : `Task ${id} (task_id: ${id}): no time in status data returned.`;
+        });
+        return { content: [{ type: "text" as const, text: sections.join("\n\n") }] };
+      } catch (error) {
+        console.error("Error fetching time in status:", error);
+        return {
+          isError: true,
+          content: [{ type: "text" as const, text: `Error fetching time in status: ${error instanceof Error ? error.message : String(error)}` }],
+        };
+      }
+    }
+  );
+}
+
+/** Formats a number of minutes as `Xd Yh Zm`, leaving out leading zero units. */
+export function formatMinutes(totalMinutes: number): string {
+  const total = Math.max(0, Math.round(Number(totalMinutes) || 0));
+  const days = Math.floor(total / 1440);
+  const hours = Math.floor((total % 1440) / 60);
+  const minutes = total % 60;
+  if (days > 0) return `${days}d ${hours}h ${minutes}m`;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  return `${minutes}m`;
+}
+
+/** Renders one task's time-in-status response: current status first, then the history in order. */
+function renderTimeInStatus(data: any): string {
+  const lines: string[] = [];
+  const current = data?.current_status;
+  if (current) {
+    const since = current.total_time?.since;
+    lines.push(
+      `Current status: ${current.status} - ${formatMinutes(current.total_time?.by_minute)}${since ? ` (since ${timestampToIso(since)})` : ""}`
+    );
+  }
+  const history: any[] = Array.isArray(data?.status_history) ? data.status_history : [];
+  if (history.length > 0) {
+    lines.push("History:");
+    history.forEach((entry, index) => {
+      lines.push(`  ${index + 1}. ${entry.status} - ${formatMinutes(entry.total_time?.by_minute)}`);
+    });
+  } else {
+    lines.push("History: none recorded");
+  }
+  return lines.join("\n");
+}
+
+/**
+ * Time in status for many tasks: the single endpoint for one id, the bulk endpoint
+ * (2 to 100 ids, repeated task_ids parameter) otherwise, in chunks of 100.
+ */
+async function fetchTimeInStatus(ids: string[]): Promise<Record<string, any>> {
+  const result: Record<string, any> = {};
+  for (let i = 0; i < ids.length; i += 100) {
+    const chunk = ids.slice(i, i + 100);
+    if (chunk.length === 1) {
+      const id = chunk[0];
+      const response = await fetch(`https://api.clickup.com/api/v2/task/${id}/time_in_status`, {
+        headers: { Authorization: CONFIG.authHeader },
+      });
+      if (!response.ok) {
+        const body = await response.text().catch(() => "");
+        throw new Error(`${id}: ${response.status} ${response.statusText} ${body}`.trim());
+      }
+      result[id] = await response.json();
+      continue;
+    }
+    const params = new URLSearchParams();
+    chunk.forEach(id => params.append("task_ids", id));
+    const response = await fetch(`https://api.clickup.com/api/v2/task/bulk_time_in_status/task_ids?${params}`, {
+      headers: { Authorization: CONFIG.authHeader },
+    });
+    if (!response.ok) {
+      const body = await response.text().catch(() => "");
+      throw new Error(`${response.status} ${response.statusText} ${body}`.trim());
+    }
+    Object.assign(result, await response.json());
+  }
+  return result;
 }
 
 /**
@@ -187,13 +314,13 @@ async function loadTaskComments(id: string): Promise<DatedContentEvent[]> {
   return commentEvents;
 }
 
-async function loadTimeInStatusHistory(taskId: string): Promise<DatedContentEvent[]> {
+async function loadTimeInStatusHistory(taskId: string): Promise<{ events: DatedContentEvent[]; data: any | null }> {
   const url = `https://api.clickup.com/api/v2/task/${taskId}/time_in_status`;
   try {
     const response = await fetch(url, { headers: { Authorization: CONFIG.authHeader } });
     if (!response.ok) {
       console.error(`Error fetching time in status for task ${taskId}: ${response.status} ${response.statusText}`);
-      return [];
+      return { events: [], data: null };
     }
     // Using 'any' for less strict typing as per user preference, but keeping structure for clarity
     const data: any = await response.json(); 
@@ -231,10 +358,10 @@ async function loadTimeInStatusHistory(taskId: string): Promise<DatedContentEven
       return [`${event.date}-${textKey}`, event];
     })).values());
 
-    return uniqueEvents;
+    return { events: uniqueEvents, data };
   } catch (error) {
     console.error(`Exception fetching time in status for task ${taskId}:`, error);
-    return [];
+    return { events: [], data: null };
   }
 }
 

@@ -1,7 +1,8 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { CONFIG } from "../shared/config";
-import { generateTaskUrl } from "../shared/utils";
+import { generateTaskUrl, getCurrentUser } from "../shared/utils";
+import { findTaskComment, assertCommentIsEditable } from "./task-write-tools";
 import { assertSafeId } from "../shared/ids";
 
 const MULTI_LIST_HINT = "Enable the Tasks in Multiple Lists ClickApp for this Space";
@@ -240,6 +241,111 @@ export function registerTaskAdminTools(server: McpServer) {
         return text(`Removed ${label} from list_id: ${list_id}. ${generateTaskUrl(task.id)}`);
       } catch (error) {
         return fail("Error removing task from list:", error);
+      }
+    }
+  );
+
+  server.tool(
+    "deleteComment",
+    [
+      "Deletes one of your own recent task comments. THIS IS PERMANENT: there is no undo.",
+      `GUARDRAILS: only comments written by the API token's own user can be deleted, and only within ${CONFIG.commentEditWindowHours} hours of their creation (same window as editComment). Only top-level comments can be deleted, not replies inside a thread.`,
+      "Two-step safety: call first with confirm=false (or omitted) to get a preview of the comment, show it to the user and ask for explicit confirmation, then call again with confirm=true.",
+      "Never set confirm=true without the user having approved deleting this specific comment."
+    ].join("\n"),
+    {
+      task_id: taskIdSchema.describe("The ID of the task the comment belongs to - needed to locate the comment"),
+      comment_id: z.string().min(1).describe("The ID of the comment to delete, as returned by addComment or getTaskById"),
+      confirm: z.boolean().optional().describe("Must be true to actually delete. Only set after the user explicitly confirmed deleting this comment.")
+    },
+    { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+    async ({ task_id, comment_id, confirm }) => {
+      try {
+        task_id = assertSafeId(task_id, "task_id");
+        comment_id = assertSafeId(comment_id, "comment_id");
+        const [comment, userData] = await Promise.all([
+          findTaskComment(task_id, comment_id),
+          getCurrentUser(),
+        ]);
+        assertCommentIsEditable(comment, userData.user.id);
+
+        const fullText = comment.comment_text ?? "";
+        const preview = fullText.length > 200 ? `${fullText.slice(0, 200)}...` : fullText;
+        const label = `comment_id: ${comment_id} on task_id: ${task_id}`;
+        if (confirm !== true) {
+          return text(
+            `Not deleted. Deleting a comment is permanent. Comment (${label}): "${preview || "(no plain text available)"}". Ask the user to confirm, then call deleteComment again with confirm=true.`,
+            true
+          );
+        }
+
+        const response = await fetch(`https://api.clickup.com/api/v2/comment/${comment_id}`, {
+          method: "DELETE",
+          headers: { Authorization: CONFIG.authHeader },
+        });
+        if (!response.ok) {
+          const body = await response.text().catch(() => "");
+          throw new Error(`${response.status} ${response.statusText} ${body}`.trim());
+        }
+        return text(`Deleted comment (${label}): "${preview || "(no plain text available)"}". ${generateTaskUrl(task_id)}`);
+      } catch (error) {
+        return fail("Error deleting comment:", error);
+      }
+    }
+  );
+
+  server.tool(
+    "mergeTasks",
+    [
+      "Merges one or more source tasks INTO a target task. ClickUp combines their content into the target and closes/merges the source tasks, so this is hard to undo.",
+      "Two-step safety: call first with confirm=false (or omitted) to get what will be merged into what, show it to the user and ask for explicit confirmation, then call again with confirm=true.",
+      "Never set confirm=true without the user having approved this specific merge."
+    ].join("\n"),
+    {
+      target_task_id: taskIdSchema.describe("The ID of the task that remains and receives the merged content"),
+      source_task_ids: z.array(z.string().min(1)).min(1).max(20).describe("The IDs of the tasks to merge into the target (1 to 20). These are closed/merged by ClickUp."),
+      confirm: z.boolean().optional().describe("Must be true to actually merge. Only set after the user explicitly confirmed this merge.")
+    },
+    { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+    async ({ target_task_id, source_task_ids, confirm }) => {
+      try {
+        target_task_id = assertSafeId(target_task_id, "target_task_id");
+        const sourceIds = Array.from(new Set(source_task_ids.map(id => assertSafeId(id, "source_task_id"))));
+        if (sourceIds.includes(target_task_id)) {
+          return text(`Refused: target_task_id ${target_task_id} is also listed in source_task_ids. A task cannot be merged into itself.`, true);
+        }
+        const [target, ...sources] = await Promise.all([target_task_id, ...sourceIds].map(fetchTask));
+        const targetLabel = `${target.name} (task_id: ${target.id}) in ${target.listName} (list_id: ${target.listId})`;
+        const sourceLines = sources.map(t => `  - ${t.name} (task_id: ${t.id}) in ${t.listName} (list_id: ${t.listId})`);
+        if (confirm !== true) {
+          return text(
+            [
+              `Not merged. Would merge ${sources.length} task(s) INTO the target ${targetLabel}:`,
+              ...sourceLines,
+              "ClickUp closes/merges the source tasks, so this is hard to undo. Ask the user to confirm, then call mergeTasks again with confirm=true.",
+            ].join("\n"),
+            true
+          );
+        }
+
+        const response = await fetch(`https://api.clickup.com/api/v2/task/${target_task_id}/merge`, {
+          method: "POST",
+          headers: { Authorization: CONFIG.authHeader, "Content-Type": "application/json" },
+          body: JSON.stringify({ source_task_ids: sourceIds }),
+        });
+        if (!response.ok) {
+          const body = await response.text().catch(() => "");
+          throw new Error(`${response.status} ${response.statusText} ${body}`.trim());
+        }
+        return text(
+          [
+            `Merged ${sources.length} task(s) into ${targetLabel}:`,
+            ...sourceLines,
+            `Target: ${generateTaskUrl(target.id)}`,
+          ].join("\n")
+        );
+      } catch (error) {
+        return fail("Error merging tasks:", error);
       }
     }
   );

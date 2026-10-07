@@ -11,9 +11,9 @@ Model Context Protocol (MCP) server enabling AI assistants to interact with Clic
 | **Setup**            | Local npm/npx install, or self-hosted remote server   | Remote MCP (no install)                     |
 | **Authentication**   | API key or ClickUp OAuth app (local browser login; remote: per-user ClickUp OAuth) | OAuth only                                  |
 | **Task Context**     | Complete with comments, status history, inline images | Requires mutiple tool calls for full contxt |
-| **Image Support**    | Read and write: inline images with smart size budgeting, and `![](local/path.png)` uploads automatically | Upload via separate tool calls; base64 capped at ~200KB |
+| **Image Support**    | Read and write: inline images with smart size budgeting, and `![](local/path.png)` uploads automatically; `attachFile` uploads any file, `getAttachment` downloads attachments | Upload via separate tool calls; base64 capped at ~200KB |
 | **Search**           | Structured filters across the workspace plus fuzzy search over recent tasks | Full-text search                            |
-| **Documents**        | CRUD operations                                       | CRUD + document search                      |
+| **Documents**        | CRUD + document search                                | CRUD + document search                      |
 | **Time Tracking**    | Timers and entries                                    | Timers and entries                          |
 | **Chat Integration** | Not supported                                         | Supported                                   |
 | **Connected Apps**   | Not supported                                         | Connected Search                            |
@@ -302,7 +302,7 @@ There is no database. Access tokens, refresh tokens and registered client ids ar
 - Dynamically registered clients may only use `https://` redirect URIs, plus `http://localhost` for Claude Code. Other schemes are rejected unless listed in `MCP_ALLOWED_REDIRECT_SCHEMES`.
 - The ClickUp login is bound to the browser that started it with a cookie, and a consent page shows which MCP client (name and redirect origin) will receive access before the user is sent to ClickUp.
 - Refresh tokens are rotated on every use; a reused refresh token is rejected (the used-token list is in memory, so it resets on restart).
-- On the hosted server, markdown image sources in comments and descriptions must be URLs or data URIs; local file paths are rejected, and URLs that resolve to private, loopback or link-local addresses are refused.
+- On the hosted server, markdown image sources in comments and descriptions must be URLs or data URIs; local file paths are rejected, and URLs that resolve to private, loopback or link-local addresses are refused, and the download connects to the validated address, closing DNS rebinding.
 - The server logs `username (user_id)` and the tool name for every call to stderr, so usage is attributable.
 
 ### Endpoints
@@ -319,15 +319,15 @@ The ClickUp MCP supports three operational modes to balance functionality, secur
 
 | Tool                   | read-minimal | read | write | Description                                                                             |
 |------------------------|:------------:|:----:|:-----:|-----------------------------------------------------------------------------------------|
-| `getTaskById`          |      ✅       |  ✅   |   ✅   | Get complete task details including comments (with threaded replies), images, and metadata |
+| `getTaskById`          |      ✅       |  ✅   |   ✅   | Get complete task details including comments (with threaded replies), images, and metadata; `include_time_in_status` adds time spent per status |
 | `addComment`           |      ❌       |  ❌   |   ✅   | Add comments to tasks, or reply inside a comment thread via `parent_comment_id`         |
 | `editComment`          |      ❌       |  ❌   |   ✅   | Correct your own comment within 24h instead of posting a follow-up                      |
 | `updateTask` | ❌ | ❌ | ✅ | Update tasks (status, priority, assignees by ID/username/email, tags with add/remove, custom fields, etc.); descriptions can be appended to or replaced entirely |
 | `createTask` | ❌ | ❌ | ✅ | Create tasks with full markdown support, assignees by ID/username/email and custom fields |
 | `searchTasks` | ✅ | ✅ | ✅ | Filter tasks by assignees, tags, dates, custom fields, lists, spaces, folders or status, optionally with fuzzy text search |
-| `searchSpaces`         |      ❌       |  ✅   |   ✅   | Browse workspace structure, project organization, and documents                         |
+| `searchSpaces`         |      ❌       |  ✅   |   ✅   | Browse workspace structure and project organization; without `terms` lists every non-archived space with its folders, lists and folderless lists (no documents, use `searchDocuments`), within a budget of about 40 requests per call (about the first 19 spaces expanded, the rest listed by name and id, marked partial) |
 | `getListInfo`          |      ❌       |  ✅   |   ✅   | Get list details and available statuses for task creation                               |
-| `updateListInfo`       |      ❌       |  ❌   |   ✅   | **SAFE APPEND-ONLY** updates to list descriptions (preserves existing content)          |
+| `updateListInfo`       |      ❌       |  ❌   |   ✅   | Rename a list; append to its description (safe default) or replace it with `content` (destructive) |
 | `getTimeEntries`       |      ❌       |  ✅   |   ✅   | View time entries and analyze time spent across projects                                |
 | `createTimeEntry`      |      ❌       |  ❌   |   ✅   | Log time entries for task tracking                                                      |
 | `readDocument`         |      ❌       |  ✅   |   ✅   | Get document details, page structure, and content with navigation                       |
@@ -342,6 +342,20 @@ The ClickUp MCP supports three operational modes to balance functionality, secur
 | `removeTaskFromList` | ❌ | ❌ | ✅ | Remove a task from an additional list (needs the ClickApp; two-step confirm) |
 | `startTimer` | ❌ | ❌ | ✅ | Start a live timer, optionally on a task |
 | `stopTimer` | ❌ | ❌ | ✅ | Stop the running timer |
+| `searchDocuments` | ❌ | ✅ | ✅ | Fuzzy search over document names, optionally within one space |
+| `getFolder` | ❌ | ✅ | ✅ | Get a folder with its space and lists (ids, task counts, URLs) |
+| `getAttachment` | ❌ | ✅ | ✅ | Fetch a task attachment: images as images, text files as text, other types as metadata |
+| `getTimeInStatus` | ❌ | ✅ | ✅ | How long 1 to 100 tasks spent in each status (bulk endpoint) |
+| `createFolder` | ❌ | ❌ | ✅ | Create a folder in a space |
+| `updateFolder` | ❌ | ❌ | ✅ | Rename a folder |
+| `createList` | ❌ | ❌ | ✅ | Create a list in a folder or as a folderless list in a space |
+| `attachFile` | ❌ | ❌ | ✅ | Upload any file to a task from a URL, data URI or (local server only) a local path |
+| `deleteComment` | ❌ | ❌ | ✅ | Delete your own comment within the edit window (two-step confirm) |
+| `mergeTasks` | ❌ | ❌ | ✅ | Merge source tasks into a target task (two-step confirm) |
+
+### Attachments
+
+`attachFile` uploads a file of any type (PDF, spreadsheet, archive, image, text) to a task. In stdio mode `source` can be an `http(s)` URL, a `data:` URI or any readable local path (or `file://` URL); the hosted server only accepts URLs and data URIs, rejects local paths and refuses URLs that resolve to private or loopback addresses. Uploads larger than `MAX_UPLOAD_SIZE_MB` are refused. `getAttachment` fetches a task attachment by ID (listed by `getTaskById`): PNG, JPEG, GIF and WebP come back as images (with a thumbnail fallback when over `MAX_RESPONSE_SIZE_MB`), text-like files (txt, md, csv, json, log, XML, YAML, HTML) as text, and other types as metadata only.
 
 ### Finding people and custom fields
 

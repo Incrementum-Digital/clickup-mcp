@@ -34,7 +34,7 @@
   "tools": [
     {
       "name": "getTaskById",
-      "description": "Get a ClickUp task with images and comments (including threaded comment replies) by ID. Always use this URL when referencing tasks in conversations or sharing with others."
+      "description": "Get a ClickUp task with images and comments (including threaded comment replies) by ID. Optionally append how long the task spent in each status (include_time_in_status). Always use this URL when referencing tasks in conversations or sharing with others."
     },
     {
       "name": "addComment",
@@ -58,7 +58,7 @@
     },
     {
       "name": "searchSpaces",
-      "description": "Search spaces (projects) by name or ID with fuzzy matching. Automatically fetches complete tree structure with lists, folders, and documents for 5 or fewer matches."
+      "description": "Search spaces (projects) by name or ID with fuzzy matching. Without search terms, lists every non-archived space with its folders, lists and folderless lists (no documents; use searchDocuments), within a budget of about 40 requests per call (roughly the first 19 spaces are expanded, further spaces are listed by name and id and the result is marked partial). Automatically fetches the complete tree structure for 5 or fewer matches."
     },
     {
       "name": "getListInfo",
@@ -66,7 +66,7 @@
     },
     {
       "name": "updateListInfo",
-      "description": "Append documentation or context to a list's description (append-only for safety) with markdown support and timestamp tracking."
+      "description": "Rename a list and/or update its description: append markdown with a timestamp (safe default) or replace the whole description with content (destructive, read it with getListInfo first)."
     },
     {
       "name": "getTimeEntries",
@@ -111,6 +111,46 @@
     {
       "name": "getRunningTimer",
       "description": "Get the current user's running timer, if any, including the task and elapsed time."
+    },
+    {
+      "name": "getFolder",
+      "description": "Get a folder with its space and all of its lists (ids, task counts and URLs)."
+    },
+    {
+      "name": "createFolder",
+      "description": "Create a folder in a space. Returns the folder id and URL."
+    },
+    {
+      "name": "updateFolder",
+      "description": "Rename a folder."
+    },
+    {
+      "name": "createList",
+      "description": "Create a list inside a folder (folder_id) or as a folderless list in a space (space_id), with optional markdown description, priority, assignee and due date. Returns the list id, URL and statuses."
+    },
+    {
+      "name": "attachFile",
+      "description": "Upload a file of any type (PDF, spreadsheet, archive, image, text) to a task from an http(s) URL, a base64 data URI or, on a local server only, a local file path. Size limit set by MAX_UPLOAD_SIZE_MB."
+    },
+    {
+      "name": "getAttachment",
+      "description": "Fetch a task attachment: images (PNG, JPEG, GIF, WebP) as images with a thumbnail fallback over the response size limit, text-like files as text, other file types as metadata only."
+    },
+    {
+      "name": "deleteComment",
+      "description": "Delete one of your own task comments within the edit window (permanent). Two-step confirm: the first call previews, confirm=true deletes."
+    },
+    {
+      "name": "mergeTasks",
+      "description": "Merge one or more source tasks into a target task (hard to undo). Two-step confirm: the first call previews, confirm=true merges."
+    },
+    {
+      "name": "getTimeInStatus",
+      "description": "Show how long 1 to 100 tasks spent in each status, with the current status and the status history, using ClickUp's bulk endpoint."
+    },
+    {
+      "name": "searchDocuments",
+      "description": "Search ClickUp documents by name with fuzzy matching, optionally restricted to one space. Returns doc ids to pass to readDocument."
     },
     {
       "name": "readDocument",

@@ -1,6 +1,6 @@
 # Plan: bring this server as close as possible to the official ClickUp MCP
 
-Status: approved 2026-10-06 (superset is fine; every official feature with a public API gets a counterpart). Phase 1 in progress. Base: commit 1441324 (hosted mode live on Railway).
+Status: approved 2026-10-06 (superset is fine; every official feature with a public API gets a counterpart, chat excluded). Phase 1 shipped in 7c311b9. Phase 2 built 2026-10-06 (33 tools), pending deploy. Base: commit 1441324 (hosted mode live on Railway).
 
 ## Goal
 
@@ -84,7 +84,7 @@ Legend: **have** = equivalent exists today, **extend** = add parameters to an ex
 ### Chat
 | Official | Ours | Action |
 |---|---|---|
-| get_chat_channels / get_chat_channel_messages / get_chat_message_replies / send_chat_message | - | Phase 3: `getChatChannels`, `getChatMessages(channel_id, limit)`, `sendChatMessage(channel_id, text, reply_to?)` on the public v3 chat endpoints. Verify each endpoint in the reference before briefing; the reference only showed channel listing clearly. |
+| get_chat_channels / get_chat_channel_messages / get_chat_message_replies / send_chat_message | - | skip (team does not use ClickUp Chat). Previously planned as Phase 3: `getChatChannels`, `getChatMessages(channel_id, limit)`, `sendChatMessage(channel_id, text, reply_to?)` on the public v3 chat endpoints. Verify each endpoint in the reference before briefing; the reference only showed channel listing clearly. |
 
 ## Phases
 
@@ -104,8 +104,8 @@ Legend: **have** = equivalent exists today, **extend** = add parameters to an ex
 4. `deleteComment`, `mergeTasks`, `getTimeInStatus`, `include_time_in_status` on getTaskById.
 5. `searchDocuments` and the README correction.
 
-### Phase 3: remaining official features
-1. Chat tools on v3 (`getChatChannels`, `getChatMessages`, `getChatReplies`, `sendChatMessage`), after verifying each endpoint in the reference.
+### Phase 3: optional leftovers
+1. Chat tools: dropped on 2026-10-06, the team does not use ClickUp Chat.
 2. `getComments` standalone, if a caller needs it.
 3. Doc page attachments, if asked.
 
@@ -123,12 +123,12 @@ Legend: **have** = equivalent exists today, **extend** = add parameters to an ex
 - Phase 1 items 1 to 3 touch `searchTasks`, assignee handling and custom fields: `sonnet-worker-deep`, one brief each, in parallel (disjoint files: search-tools.ts; a new members module plus the assignee call sites; a new custom-fields module plus createTask/updateTask).
 - Phase 1 items 4 to 7: `sonnet-worker` (pattern work following existing tools), one brief for the task write tools, one for timers.
 - Phase 2: `sonnet-worker` per group.
-- Review: Phase 1 as one cross-family panel pass (data-mutating tools), Phase 2 one `/codex:review` pass, Phase 3 my read only.
+- Review: Phase 1 as one cross-family panel pass (data-mutating tools), Phase 2 one `/codex:review` pass.
 - Deploy: Railway auto-deploys from `main`; each phase ships after the suite passes and a live `tools/list` shows the new tools.
 
 ## Acceptance for "as close as possible"
 
-- Every official tool except search, reminders and the operator catalog has a mapped counterpart in this table marked have, extend or new, and all extend/new items in Phases 1 and 2 are implemented.
+- Every official tool except search, reminders, chat and the operator catalog has a mapped counterpart in this table marked have, extend or new, and all extend/new items in Phases 1 and 2 are implemented.
 - `npm test` passes; `npm run smoke` lists the new tools over stdio; the hosted `tools/list` shows them for an authorized user.
 - The README comparison table is updated to state exactly which three capabilities remain official-only.
 

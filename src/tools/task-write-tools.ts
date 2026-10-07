@@ -1047,7 +1047,7 @@ function formatTimeEstimate(hours: number): string {
  * Note the list only contains top-level comments; replies inside a thread live
  * behind `/comment/{parent_id}/reply` and are therefore not editable here.
  */
-async function findTaskComment(taskId: string, commentId: string): Promise<ExistingComment> {
+export async function findTaskComment(taskId: string, commentId: string): Promise<ExistingComment> {
   const oldestEditableDate = Date.now() - CONFIG.commentEditWindowHours * 60 * 60 * 1000;
 
   let cursor: CommentPageCursor | undefined;
@@ -1095,7 +1095,7 @@ async function findTaskComment(taskId: string, commentId: string): Promise<Exist
  * other people's comments safe, and the time window is what keeps the tool from
  * rewriting history.
  */
-function assertCommentIsEditable(comment: ExistingComment, currentUserId: number | string): void {
+export function assertCommentIsEditable(comment: ExistingComment, currentUserId: number | string): void {
   const windowHours = CONFIG.commentEditWindowHours;
   if (!(windowHours > 0)) {
     throw new Error(

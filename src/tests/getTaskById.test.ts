@@ -317,3 +317,71 @@ test('getTaskById renders threaded comment replies nested under their parent', a
   t.mock.timers.reset();
 });
 
+
+async function runGetTaskByIdTimeInStatus(t: any, args: Record<string, any>) {
+  t.mock.timers.enable();
+  process.env.CLICKUP_API_KEY = 'test-key';
+  process.env.CLICKUP_TEAM_ID = 'team1';
+
+  const { registerTaskToolsRead } = await import('../tools/task-tools');
+  const mockAgent = new MockAgent();
+  mockAgent.disableNetConnect();
+  setGlobalDispatcher(mockAgent);
+  const client = mockAgent.get('https://api.clickup.com');
+
+  client.intercept({ path: /\/api\/v2\/task\/task123\?.*/, method: 'GET' })
+    .reply(200, {
+      id: 'task123', name: 'Test Task', markdown_description: '', attachments: [],
+      creator: { username: 'creator', id: '1' }, assignees: [],
+      list: { id: 'list1', name: 'List' }, space: { id: 'space1', name: 'Space' },
+      status: { status: 'open', type: 'open' }, url: 'https://app.clickup.com/t/task123',
+      date_created: '0', date_updated: '0'
+    });
+  client.intercept({ path: /\/api\/v2\/task\/task123\/comment.*/, method: 'GET' })
+    .reply(200, { comments: [] });
+  let timeInStatusRequests = 0;
+  client.intercept({ path: '/api/v2/task/task123/time_in_status', method: 'GET' })
+    .reply(() => {
+      timeInStatusRequests++;
+      return {
+        statusCode: 200,
+        data: {
+          current_status: { status: 'in progress', total_time: { by_minute: 130, since: '1700000000000' } },
+          status_history: [{ status: 'open', total_time: { by_minute: 45, since: '1690000000000' } }],
+        },
+      };
+    });
+  client.intercept({ path: /\/api\/v2\/team\/team1\/time_entries.*/, method: 'GET' })
+    .reply(200, { data: [] });
+
+  const tools: Record<string, any> = {};
+  registerTaskToolsRead({
+    tool: (name: string, _d: string, _s: any, _o: any, handler: any) => { tools[name] = handler; }
+  } as any, { user: { username: 'me', id: 'u1' } });
+
+  const result = await tools.getTaskById({ id: 'task123', ...args });
+  const text = result.content
+    .filter((block: any) => typeof block.text === 'string')
+    .map((block: any) => block.text)
+    .join('\n');
+
+  await mockAgent.close();
+  t.mock.timers.reset();
+  return { text, timeInStatusRequests };
+}
+
+test('getTaskById omits the Time in status section by default and makes no extra request', async (t) => {
+  const { text, timeInStatusRequests } = await runGetTaskByIdTimeInStatus(t, {});
+  assert.ok(!text.includes('Time in status'));
+  // The single request is the one that feeds the status history
+  assert.equal(timeInStatusRequests, 1);
+});
+
+test('getTaskById appends a Time in status section when asked, reusing the same request', async (t) => {
+  const { text, timeInStatusRequests } = await runGetTaskByIdTimeInStatus(t, { include_time_in_status: true });
+  assert.ok(text.includes('Time in status:'));
+  assert.ok(text.includes('Current status: in progress - 2h 10m'));
+  assert.ok(text.includes('1. open - 45m'));
+  assert.ok(text.indexOf('Time in status:') > text.indexOf("Status set to 'open'"));
+  assert.equal(timeInStatusRequests, 1);
+});

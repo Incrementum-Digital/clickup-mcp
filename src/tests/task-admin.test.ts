@@ -167,3 +167,143 @@ test("removeTaskFromList refuses to remove the home list", async (t) => {
   assert.ok(result.content[0].text.includes("deleteTask"));
   await cleanup();
 });
+
+// ---- deleteComment / mergeTasks ----
+
+const HOUR = 60 * 60 * 1000;
+
+/** Like setup(), but only setTimeout is mocked: the comment age check needs the real Date.now(). */
+async function setupReal(t: any) {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  process.env.CLICKUP_API_KEY = "test-key";
+  process.env.CLICKUP_TEAM_ID = "team1";
+  const { registerTaskAdminTools } = await import("../tools/task-admin-tools");
+  const mockAgent = new MockAgent();
+  mockAgent.disableNetConnect();
+  setGlobalDispatcher(mockAgent);
+  const client = mockAgent.get("https://api.clickup.com");
+  const tools: Record<string, any> = {};
+  registerTaskAdminTools({
+    tool: (name: string, _d: string, _s: any, _o: any, handler: any) => { tools[name] = handler; },
+  } as any);
+  client.intercept({ path: "/api/v2/user", method: "GET" }).reply(200, { user: { id: 42, username: "me" } });
+  const cleanup = async () => {
+    await mockAgent.close();
+    t.mock.timers.runAll();
+    t.mock.timers.reset();
+  };
+  return { client, tools, cleanup };
+}
+
+function comment(overrides: Record<string, any> = {}) {
+  return {
+    id: "c1",
+    date: String(Date.now() - HOUR),
+    comment_text: "Hello there",
+    user: { id: 42, username: "me" },
+    reply_count: 0,
+    ...overrides,
+  };
+}
+
+function interceptComments(client: any, comments: any[]) {
+  client.intercept({ path: "/api/v2/task/t1/comment", method: "GET" }).reply(200, { comments });
+}
+
+test("deleteComment refuses another user's comment and sends no DELETE", async (t) => {
+  const { client, tools, cleanup } = await setupReal(t);
+  interceptComments(client, [comment({ user: { id: 7, username: "other" } })]);
+  let deleted = false;
+  client.intercept({ path: "/api/v2/comment/c1", method: "DELETE" }).reply(() => { deleted = true; return { statusCode: 200, data: {} }; });
+
+  const result = await tools.deleteComment({ task_id: "t1", comment_id: "c1", confirm: true });
+  assert.equal(result.isError, true);
+  assert.ok(result.content[0].text.includes("other (user_id: 7)"));
+  assert.equal(deleted, false);
+  await cleanup();
+});
+
+test("deleteComment refuses a comment outside the edit window", async (t) => {
+  const { client, tools, cleanup } = await setupReal(t);
+  interceptComments(client, [comment({ date: String(Date.now() - 400 * HOUR) })]);
+  let deleted = false;
+  client.intercept({ path: "/api/v2/comment/c1", method: "DELETE" }).reply(() => { deleted = true; return { statusCode: 200, data: {} }; });
+
+  const result = await tools.deleteComment({ task_id: "t1", comment_id: "c1", confirm: true });
+  assert.equal(result.isError, true);
+  assert.ok(result.content[0].text.includes("edit window"));
+  assert.equal(deleted, false);
+  await cleanup();
+});
+
+test("deleteComment without confirm previews 200 chars and sends no DELETE", async (t) => {
+  const { client, tools, cleanup } = await setupReal(t);
+  interceptComments(client, [comment({ comment_text: "x".repeat(300) })]);
+  let deleted = false;
+  client.intercept({ path: "/api/v2/comment/c1", method: "DELETE" }).reply(() => { deleted = true; return { statusCode: 200, data: {} }; });
+
+  const result = await tools.deleteComment({ task_id: "t1", comment_id: "c1" });
+  assert.equal(result.isError, true);
+  assert.ok(result.content[0].text.includes("x".repeat(200) + "..."));
+  assert.ok(!result.content[0].text.includes("x".repeat(201)));
+  assert.ok(result.content[0].text.includes("comment_id: c1"));
+  assert.equal(deleted, false);
+  await cleanup();
+});
+
+test("deleteComment deletes with confirm", async (t) => {
+  const { client, tools, cleanup } = await setupReal(t);
+  interceptComments(client, [comment()]);
+  let deleted = false;
+  client.intercept({ path: "/api/v2/comment/c1", method: "DELETE" }).reply(() => { deleted = true; return { statusCode: 200, data: {} }; });
+
+  const result = await tools.deleteComment({ task_id: "t1", comment_id: "c1", confirm: true });
+  assert.ok(!result.isError);
+  assert.equal(deleted, true);
+  assert.ok(result.content[0].text.includes("Deleted comment (comment_id: c1 on task_id: t1)"));
+  await cleanup();
+});
+
+const mergeTask = (id: string, name: string) => ({ id, name, list: { id: "L1", name: "Home" } });
+
+test("mergeTasks without confirm previews and sends no POST", async (t) => {
+  const { client, tools, cleanup } = await setup(t);
+  client.intercept({ path: "/api/v2/task/target1", method: "GET" }).reply(200, mergeTask("target1", "Target"));
+  client.intercept({ path: "/api/v2/task/src1", method: "GET" }).reply(200, mergeTask("src1", "Source One"));
+  client.intercept({ path: "/api/v2/task/src2", method: "GET" }).reply(200, mergeTask("src2", "Source Two"));
+  let posted = false;
+  client.intercept({ path: "/api/v2/task/target1/merge", method: "POST" }).reply(() => { posted = true; return { statusCode: 200, data: {} }; });
+
+  const result = await tools.mergeTasks({ target_task_id: "target1", source_task_ids: ["src1", "src2"] });
+  assert.equal(result.isError, true);
+  const msg = result.content[0].text;
+  assert.ok(msg.includes("Target (task_id: target1)"));
+  assert.ok(msg.includes("Source One (task_id: src1)"));
+  assert.ok(msg.includes("Source Two (task_id: src2)"));
+  assert.equal(posted, false);
+  await cleanup();
+});
+
+test("mergeTasks with confirm POSTs source_task_ids and reports the target URL", async (t) => {
+  const { client, tools, cleanup } = await setup(t);
+  client.intercept({ path: "/api/v2/task/target1", method: "GET" }).reply(200, mergeTask("target1", "Target"));
+  client.intercept({ path: "/api/v2/task/src1", method: "GET" }).reply(200, mergeTask("src1", "Source One"));
+  let body: any;
+  client.intercept({ path: "/api/v2/task/target1/merge", method: "POST" }).reply((opts) => { body = JSON.parse(String(opts.body)); return { statusCode: 200, data: {} }; });
+
+  const result = await tools.mergeTasks({ target_task_id: "target1", source_task_ids: ["src1"], confirm: true });
+  assert.ok(!result.isError);
+  assert.deepEqual(body, { source_task_ids: ["src1"] });
+  assert.ok(result.content[0].text.includes("https://app.clickup.com/t/target1"));
+  await cleanup();
+});
+
+test("mergeTasks rejects unsafe ids and a target listed as source", async (t) => {
+  const { tools, cleanup } = await setup(t);
+  const bad = await tools.mergeTasks({ target_task_id: "target1", source_task_ids: ["../list/1"], confirm: true });
+  assert.equal(bad.isError, true);
+  const self = await tools.mergeTasks({ target_task_id: "target1", source_task_ids: ["target1"], confirm: true });
+  assert.equal(self.isError, true);
+  assert.ok(self.content[0].text.includes("itself"));
+  await cleanup();
+});

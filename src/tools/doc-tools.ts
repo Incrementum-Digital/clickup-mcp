@@ -1,7 +1,29 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { CONFIG } from "../shared/config";
-import { generateDocumentUrl } from "../shared/utils";
+import Fuse from "fuse.js";
+import {
+  DOCS_MAX_PAGES,
+  generateDocumentUrl,
+  getSpaceNameFromIndex,
+  getWorkspaceDocs,
+  performMultiTermSearch,
+} from "../shared/utils";
+import { assertSafeId } from "../shared/ids";
+
+const PARENT_TYPE_LABELS: Record<string, string> = {
+  "4": "Space", SPACE: "Space",
+  "5": "Folder", FOLDER: "Folder",
+  "6": "List", LIST: "List",
+  "7": "Workspace", WORKSPACE: "Workspace",
+};
+
+function formatDate(value: any): string | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  const ms = Number(value);
+  const date = new Date(Number.isFinite(ms) ? ms : value);
+  return isNaN(date.getTime()) ? undefined : date.toISOString().slice(0, 10);
+}
 
 /**
  * Helper function to recursively extract all pages from nested page structure
@@ -51,6 +73,101 @@ function displayPageHierarchy(pageGroup: any, currentPageId: string, depth: numb
 }
 
 export function registerDocumentToolsRead(server: McpServer) {
+  server.tool(
+    "searchDocuments",
+    [
+      "Search ClickUp documents (Docs) by name using fuzzy matching. Terms are OR'd; docs matching more terms rank higher.",
+      "Optionally restrict to one space with space_id. Results show doc_id, parent, dates and URL.",
+      "Next step: call readDocument with the doc_id to read the document's pages and content.",
+    ].join("\n"),
+    {
+      terms: z
+        .array(z.string())
+        .min(1)
+        .describe("Search terms matched against document names (and ids). Any term may match."),
+      space_id: z
+        .string()
+        .optional()
+        .describe("Optional: only list documents located directly in this space"),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(50)
+        .optional()
+        .describe("Maximum number of results (default 20, max 50)"),
+    },
+    {
+      readOnlyHint: true,
+    },
+    async ({ terms, space_id, limit = 20 }) => {
+      try {
+        const spaceId = space_id ? assertSafeId(space_id, "space_id") : undefined;
+        const { docs, capped } = await getWorkspaceDocs(spaceId);
+
+        // Client-side filter as a safety net in case the API ignores the parent filter
+        const scoped = spaceId
+          ? docs.filter((doc: any) => !doc.parent?.id || String(doc.parent.id) === spaceId)
+          : docs;
+
+        const index = new Fuse(scoped.map((doc: any) => ({ ...doc, id: String(doc.id) })), {
+          keys: [
+            { name: "name", weight: 0.7 },
+            { name: "id", weight: 0.6 },
+          ],
+          includeScore: true,
+          threshold: 0.4,
+          minMatchCharLength: 1,
+        });
+        const matches = (await performMultiTermSearch(index, terms)).slice(0, limit);
+
+        const lines: string[] = [];
+        for (const doc of matches) {
+          const parentId = doc.parent?.id !== undefined ? String(doc.parent.id) : undefined;
+          const parentType = doc.parent?.type !== undefined ? String(doc.parent.type) : undefined;
+          const typeLabel = parentType ? PARENT_TYPE_LABELS[parentType.toUpperCase()] : undefined;
+          let parentText = "";
+          if (parentId) {
+            const spaceName = typeLabel === "Space" ? await getSpaceNameFromIndex(parentId) : undefined;
+            parentText = `${typeLabel ?? "Parent"}: ${spaceName ? `${spaceName} ` : ""}(${(typeLabel ?? "parent").toLowerCase()}_id: ${parentId})`;
+          }
+          const created = formatDate(doc.date_created);
+          const updated = formatDate(doc.date_updated);
+          const pageCount = Array.isArray(doc.pages) ? doc.pages.length : doc.page_count ?? doc.pages_count;
+          const details = [
+            parentText,
+            created ? `Created: ${created}` : "",
+            updated ? `Updated: ${updated}` : "",
+            pageCount !== undefined ? `Pages: ${pageCount}` : "",
+          ].filter(Boolean);
+          lines.push(`📄 ${doc.name} (doc_id: ${doc.id})`);
+          if (details.length) lines.push(`   ${details.join(" | ")}`);
+          lines.push(`   URL: ${generateDocumentUrl(String(doc.id))}`);
+        }
+
+        const header = `Found ${matches.length} document(s) matching ${terms.map(t => `"${t}"`).join(", ")}${spaceId ? ` in space ${spaceId}` : ""} (searched ${scoped.length} documents).`;
+        const footer: string[] = [];
+        if (capped) {
+          footer.push(`⚠️ Document listing stopped after ${DOCS_MAX_PAGES} pages; some documents were not searched. Narrow the search with space_id.`);
+        }
+        if (matches.length > 0) {
+          footer.push("Use readDocument with a doc_id to read its content.");
+        }
+        return {
+          content: [{ type: "text", text: [header, ...lines, ...footer].join("\n") }],
+        };
+      } catch (error) {
+        console.error("Error searching documents:", error);
+        return {
+          content: [{
+            type: "text",
+            text: `Error searching documents: ${error instanceof Error ? error.message : "Unknown error"}`,
+          }],
+        };
+      }
+    }
+  );
+
   server.tool(
     "readDocument",
     [
