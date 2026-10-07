@@ -1,3 +1,4 @@
+import { clickupFetch, ClickUpRateLimitError } from "./clickup-fetch";
 import { CONFIG } from "./config";
 
 /** A task comment as returned by GET /api/v2/task/{task_id}/comment or GET /comment/{id}/reply */
@@ -36,7 +37,7 @@ export async function fetchCommentPage(
     ? `?${new URLSearchParams({ start: cursor.start, start_id: cursor.startId })}`
     : "";
 
-  const response = await fetch(
+  const response = await clickupFetch(
     `https://api.clickup.com/api/v2/task/${taskId}/comment${query}`,
     { headers: { Authorization: CONFIG.authHeader } }
   );
@@ -133,7 +134,7 @@ export async function findTopLevelComment(
  */
 export async function fetchCommentReplies(commentId: string): Promise<ExistingComment[]> {
   try {
-    const response = await fetch(
+    const response = await clickupFetch(
       `https://api.clickup.com/api/v2/comment/${commentId}/reply`,
       { headers: { Authorization: CONFIG.authHeader } }
     );
@@ -150,6 +151,7 @@ export async function fetchCommentReplies(commentId: string): Promise<ExistingCo
     const replies: ExistingComment[] = Array.isArray(data?.comments) ? data.comments : [];
     return replies.sort((a, b) => Number(a.date) - Number(b.date));
   } catch (error) {
+    if (error instanceof ClickUpRateLimitError) throw error;
     console.error(`Error fetching replies for comment ${commentId}:`, error);
     return [];
   }

@@ -1,3 +1,4 @@
+import { clickupFetch } from "./clickup-fetch";
 import {CONFIG} from "./config";
 import Fuse from 'fuse.js';
 import {credentialCacheKey} from "./request-context";
@@ -31,7 +32,7 @@ export async function getCurrentUser() {
 
   // Create the fetch promise
   const fetchPromise = (async () => {
-    const userResponse = await fetch("https://api.clickup.com/api/v2/user", {
+    const userResponse = await clickupFetch("https://api.clickup.com/api/v2/user", {
       headers: { Authorization: CONFIG.authHeader },
     });
 
@@ -73,7 +74,7 @@ export function getSpaceDetails(spaceId: string): Promise<any> {
     return cachedSpace;
   }
 
-  const fetchPromise = fetch(
+  const fetchPromise = clickupFetch(
     `https://api.clickup.com/api/v2/space/${spaceId}`,
     {headers: {Authorization: CONFIG.authHeader}})
     .then(res => {
@@ -268,7 +269,10 @@ async function fetchTasksLegacy(queryString: string, scoped: boolean): Promise<O
   const taskLists = await Promise.all([...Array(maxPages)].map(async (_, i) => {
     const url = `https://api.clickup.com/api/v2/team/${CONFIG.teamId}/task?${queryString}&page=${i}`;
     try {
-      const res = await fetch(url, {headers: {Authorization: CONFIG.authHeader}});
+      const res = await clickupFetch(url, {headers: {Authorization: CONFIG.authHeader}});
+      if (!res.ok) {
+        throw new Error(`ClickUp API error ${res.status} ${res.statusText}`);
+      }
       return await res.json();
     } catch (e) {
       console.error(`Error fetching page ${i}:`, e);
@@ -296,7 +300,7 @@ async function fetchTasks(queryString: string): Promise<Omit<TaskSearchResult, '
     const url = `https://api.clickup.com/api/v2/team/${CONFIG.teamId}/task?${queryString}&page=${page}`;
     let body: any;
     try {
-      const res = await fetch(url, {headers: {Authorization: CONFIG.authHeader}});
+      const res = await clickupFetch(url, {headers: {Authorization: CONFIG.authHeader}});
       body = await res.json().catch(() => ({}));
       if (!res.ok) {
         throw new Error(`ClickUp API error ${res.status}${body?.err ? `: ${body.err}` : ''}`);
@@ -493,7 +497,7 @@ export async function getSpaceSearchIndex(): Promise<Fuse<any> | null> {
   const fetchPromise = (async (): Promise<Fuse<any> | null> => {
     try {
       const url = `https://api.clickup.com/api/v2/team/${CONFIG.teamId}/space`;
-      const response = await fetch(url, {
+      const response = await clickupFetch(url, {
         headers: { Authorization: CONFIG.authHeader },
       });
 
@@ -551,28 +555,37 @@ export async function getSpaceContent(spaceId: string): Promise<{ lists: any[], 
   const fetchPromise = (async () => {
     try {
       const [folders, lists, documents] = await Promise.all([
-        fetch(`https://api.clickup.com/api/v2/space/${spaceId}/folder`, {
+        clickupFetch(`https://api.clickup.com/api/v2/space/${spaceId}/folder`, {
           headers: {Authorization: CONFIG.authHeader},
         })
-          .then(response => response.json())
+          .then(response => {
+            if (!response.ok) throw new Error(`Error fetching space folders: ${response.status} ${response.statusText}`);
+            return response.json();
+          })
           .then(json => json.folders || [])
           .catch(e => {
             console.error(e);
             return []
           }),
-        fetch(`https://api.clickup.com/api/v2/space/${spaceId}/list`, {
+        clickupFetch(`https://api.clickup.com/api/v2/space/${spaceId}/list`, {
           headers: {Authorization: CONFIG.authHeader},
         })
-          .then(response => response.json())
+          .then(response => {
+            if (!response.ok) throw new Error(`Error fetching space lists: ${response.status} ${response.statusText}`);
+            return response.json();
+          })
           .then(json => json.lists || [])
           .catch(e => {
             console.error(e);
             return []
           }),
-        fetch(`https://api.clickup.com/api/v3/workspaces/${CONFIG.teamId}/docs?parent_id=${spaceId}`, {
+        clickupFetch(`https://api.clickup.com/api/v3/workspaces/${CONFIG.teamId}/docs?parent_id=${spaceId}`, {
           headers: {Authorization: CONFIG.authHeader},
         })
-          .then(response => response.json())
+          .then(response => {
+            if (!response.ok) throw new Error(`Error fetching space docs: ${response.status} ${response.statusText}`);
+            return response.json();
+          })
           .then(json => json.docs || [])
           .catch(e => {
             console.error(e);
@@ -583,7 +596,7 @@ export async function getSpaceContent(spaceId: string): Promise<{ lists: any[], 
       // For each folder, also fetch its lists
       const folderListPromises = folders.map(async (folder: any) => {
         try {
-          const folderListResponse = await fetch(
+          const folderListResponse = await clickupFetch(
             `https://api.clickup.com/api/v2/folder/${folder.id}/list`,
             { headers: { Authorization: CONFIG.authHeader } }
           );
@@ -632,7 +645,7 @@ export function getSpaceHierarchy(spaceId: string): Promise<{ lists: any[], fold
   if (cached) return cached;
 
   const get = async (path: string, field: string): Promise<any[]> => {
-    const response = await fetch(`https://api.clickup.com/api/v2/space/${spaceId}/${path}`, {
+    const response = await clickupFetch(`https://api.clickup.com/api/v2/space/${spaceId}/${path}`, {
       headers: { Authorization: CONFIG.authHeader },
     });
     if (!response.ok) {
@@ -667,7 +680,7 @@ export async function getAllTeamMembers(): Promise<string[]> {
   // Create the fetch promise
   const fetchPromise = (async (): Promise<string[]> => {
     try {
-      const response = await fetch(`https://api.clickup.com/api/v2/team`, {
+      const response = await clickupFetch(`https://api.clickup.com/api/v2/team`, {
         headers: { Authorization: CONFIG.authHeader },
       });
 
@@ -809,7 +822,7 @@ export async function getWorkspaceDocs(spaceId?: string): Promise<{ docs: any[],
       if (cursor) {
         params.set('next_cursor', cursor);
       }
-      const response = await fetch(`https://api.clickup.com/api/v3/workspaces/${CONFIG.teamId}/docs?${params.toString()}`, {
+      const response = await clickupFetch(`https://api.clickup.com/api/v3/workspaces/${CONFIG.teamId}/docs?${params.toString()}`, {
         headers: { Authorization: CONFIG.authHeader },
       });
       if (!response.ok) {

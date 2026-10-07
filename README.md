@@ -296,6 +296,10 @@ There is no database. Access tokens, refresh tokens and registered client ids ar
 - Issued tokens cannot be revoked early. Revoking the app inside ClickUp (avatar > Settings > Apps / Integrations) invalidates the wrapped ClickUp token, which stops it working.
 - A restart clears the in-memory list of used refresh tokens.
 
+### Rate limits and bursts
+
+ClickUp allows 100 requests per minute per user token, and some tools cost several requests (a full `getTaskById` is 4 to 6). The server keeps at most `CLICKUP_MAX_CONCURRENT_REQUESTS` requests in flight per user and queues the rest. On a 429 it waits for ClickUp's reset time when that is short and retries; otherwise the tool returns an error such as `ClickUp rate limit reached for this user (100 requests/minute). Retry after 37s.` so the calling agent can back off. Agents reading many tasks should prefer one `searchTasks` call with a list or assignee filter over dozens of individual reads.
+
 ### Security notes
 
 - MCP session ids are bound to the user who created them; another user's token gets a 403.
@@ -402,6 +406,8 @@ This MCP server can be configured using environment variables. In the desktop ex
 - `MAX_RESPONSE_SIZE_MB`: (Optional) The maximum response size in megabytes for `getTaskById`. Uses intelligent size budgeting to fit the most important images within the limit. Defaults to 1.
 - `MAX_UPLOAD_SIZE_MB`: (Optional) The maximum size of a single image uploaded when writing comments or descriptions. Defaults to 10.
 - `CLICKUP_COMMENT_EDIT_WINDOW_HOURS`: (Optional) How long after creation `editComment` may still rewrite a comment. Defaults to 24. Set to `0` to disable comment editing entirely.
+- `CLICKUP_MAX_CONCURRENT_REQUESTS`: (Optional) Maximum ClickUp API requests in flight per user; further requests queue. Defaults to 6. Keeps bursts of parallel tool calls inside ClickUp's 100 requests/minute per-user limit.
+- `CLICKUP_RATE_LIMIT_MAX_WAIT_SECONDS`: (Optional) When ClickUp answers 429, the server waits for the reset and retries if the wait is at most this many seconds (default 20); otherwise the tool returns a rate-limit error that states when to retry.
 - `CLICKUP_PRIMARY_LANGUAGE`: (Optional) A hint for the primary language used in your ClickUp tasks (e.g., "de" for German, "en" for English). This helps the `searchTask` tool provide more tailored guidance in its description for multilingual searches.
 - `LANG`: (Optional) If `CLICKUP_PRIMARY_LANGUAGE` is not set, the MCP will check this standard environment variable (e.g., "en_US.UTF-8", "de_DE") as a fallback to infer the primary language.
 

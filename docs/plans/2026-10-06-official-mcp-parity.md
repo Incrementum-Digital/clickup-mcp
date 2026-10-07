@@ -1,6 +1,6 @@
 # Plan: bring this server as close as possible to the official ClickUp MCP
 
-Status: approved 2026-10-06 (superset is fine; every official feature with a public API gets a counterpart, chat excluded). Phase 1 shipped in 7c311b9. Phase 2 built 2026-10-06 (33 tools), pending deploy. Base: commit 1441324 (hosted mode live on Railway).
+Status: approved 2026-10-06 (superset is fine; every official feature with a public API gets a counterpart, chat excluded). Phase 1 shipped in 7c311b9. Phase 2 shipped in 81eb6e2 (33 tools). Base: commit 1441324 (hosted mode live on Railway).
 
 ## Goal
 

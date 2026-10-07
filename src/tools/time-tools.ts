@@ -1,3 +1,4 @@
+import { clickupFetch } from "../shared/clickup-fetch";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { CONFIG } from "../shared/config";
@@ -69,7 +70,7 @@ function formatHoursMinutes(durationMs: number): string {
 
 /** Fetches the authenticated user's running timer entry, or null if none is running */
 async function fetchRunningTimer(): Promise<any | null> {
-  const response = await fetch(`${TIME_ENTRIES_URL()}/current`, {
+  const response = await clickupFetch(`${TIME_ENTRIES_URL()}/current`, {
     headers: { Authorization: CONFIG.authHeader },
   });
   if (!response.ok) {
@@ -156,7 +157,7 @@ export function registerTimeToolsRead(server: McpServer) {
           }
         }
 
-        const response = await fetch(`https://api.clickup.com/api/v2/team/${CONFIG.teamId}/time_entries?${params}`, {
+        const response = await clickupFetch(`https://api.clickup.com/api/v2/team/${CONFIG.teamId}/time_entries?${params}`, {
           headers: { Authorization: CONFIG.authHeader },
         });
 
@@ -419,7 +420,7 @@ export function registerTimeToolsWrite(server: McpServer) {
           ...(description && { description })
         };
 
-        const response = await fetch(`https://api.clickup.com/api/v2/team/${CONFIG.teamId}/time_entries`, {
+        const response = await clickupFetch(`https://api.clickup.com/api/v2/team/${CONFIG.teamId}/time_entries`, {
           method: 'POST',
           headers: { 
             Authorization: CONFIG.authHeader,
@@ -506,7 +507,7 @@ export function registerTimeToolsWrite(server: McpServer) {
           ...(billable !== undefined && { billable })
         };
 
-        const response = await fetch(`${TIME_ENTRIES_URL()}/start`, {
+        const response = await clickupFetch(`${TIME_ENTRIES_URL()}/start`, {
           method: 'POST',
           headers: {
             Authorization: CONFIG.authHeader,
@@ -526,7 +527,7 @@ export function registerTimeToolsWrite(server: McpServer) {
         let taskName: string | undefined = entry.task?.name;
         if (task_id && !taskName) {
           try {
-            const taskResponse = await fetch(`https://api.clickup.com/api/v2/task/${task_id}`, {
+            const taskResponse = await clickupFetch(`https://api.clickup.com/api/v2/task/${task_id}`, {
               headers: { Authorization: CONFIG.authHeader },
             });
             if (taskResponse.ok) {
@@ -568,7 +569,7 @@ export function registerTimeToolsWrite(server: McpServer) {
           return textResult('No timer running, nothing to stop.');
         }
 
-        const response = await fetch(`${TIME_ENTRIES_URL()}/stop`, {
+        const response = await clickupFetch(`${TIME_ENTRIES_URL()}/stop`, {
           method: 'POST',
           headers: {
             Authorization: CONFIG.authHeader,

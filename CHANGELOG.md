@@ -26,6 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Time in status.** `getTimeInStatus` (read and write modes) reports how long 1 to 100 tasks spent in each status via the bulk endpoint, and `getTaskById` takes `include_time_in_status` to append the same section.
 - **`searchDocuments`** (read and write modes). Fuzzy search over document names from the workspace docs listing, with optional `space_id` filter on the doc's direct parent; capped at 10 pages and cached for 60 seconds.
 
+### Fixed
+- **Bursts of tool calls no longer crash on ClickUp's rate limit.** 24 parallel `getTaskById` calls exceeded the 100 requests/minute per-user limit; the 429 error body was parsed as a task and the tool failed with `Cannot read properties of undefined (reading 'status')`, then kept issuing follow-up requests with an undefined task id. All ClickUp calls now go through one wrapper that caps in-flight requests per user (`CLICKUP_MAX_CONCURRENT_REQUESTS`, default 6, FIFO queue), waits for ClickUp's `Retry-After`/`X-RateLimit-Reset` and retries up to twice when the wait is at most `CLICKUP_RATE_LIMIT_MAX_WAIT_SECONDS` (default 20), pauses that user's queued calls until the reset, and otherwise returns a `ClickUp rate limit reached … Retry after Ns` error. `getTaskById` checks the task response before parsing (404 → not found, 429 → the rate-limit message) and skips comments, time-in-status, time-entries and space requests when the task fetch failed; those loaders also surface rate-limit errors instead of silently returning empty data.
+
 ### Changed
 - `CLICKUP_API_KEY` and `CLICKUP_TEAM_ID` are now optional (also in the MCPB `manifest.json` form). The missing-credentials error is now raised at server startup instead of at module load.
 - `engines.node` is now `>=18`. New runtime dependencies `express` and `cors`.

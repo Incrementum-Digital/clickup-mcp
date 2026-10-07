@@ -1,3 +1,4 @@
+import { clickupFetch, ClickUpRateLimitError } from "../shared/clickup-fetch";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { convertMarkdownToToolCallResult, convertClickUpTextItemsToToolCallResult } from "../clickup-text";
@@ -38,53 +39,67 @@ export function registerTaskToolsRead(server: McpServer, userData: any) {
       readOnlyHint: true
     },
     async ({ id, include_time_in_status }) => {
-      // 1. Load base task content, comment events, and status change events in parallel
-      const [taskDetailContentBlocks, commentEvents, timeInStatus] = await Promise.all([
-        loadTaskContent(id), // Returns Promise<ContentBlock[]>
-        loadTaskComments(id), // Returns Promise<DatedContentEvent[]>
-        loadTimeInStatusHistory(id), // Returns events plus the raw response (one request serves both)
-      ]);
-      const statusChangeEvents = timeInStatus.events;
-
-      // 2. Combine comment and status change events
-      const allDatedEvents: DatedContentEvent[] = [...commentEvents, ...statusChangeEvents];
-
-      // 3. Sort all dated events chronologically
-      allDatedEvents.sort((a, b) => {
-        const dateA = a.date ? parseInt(a.date) : 0;
-        const dateB = b.date ? parseInt(b.date) : 0;
-        return dateA - dateB;
-      });
-
-      // 4. Flatten sorted events into a single ContentBlock stream
-      let processedEventBlocks: (ContentBlock | ImageMetadataBlock)[] = [];
-      for (const event of allDatedEvents) {
-        processedEventBlocks.push(...event.contentBlocks);
+      try {
+        return await readTask(id, include_time_in_status);
+      } catch (error) {
+        // Rate limit, not found or any other ClickUp error: report it as-is instead of crashing.
+        const message = error instanceof Error ? error.message : String(error);
+        return { isError: true, content: [{ type: "text" as const, text: message }] };
       }
-
-      // 5. Combine task details with processed event blocks
-      const allContentBlocks: (ContentBlock | ImageMetadataBlock)[] = [...taskDetailContentBlocks, ...processedEventBlocks];
-
-      // The time-in-status response was already fetched for the status history above,
-      // so the optional section costs no extra request.
-      if (include_time_in_status) {
-        allContentBlocks.push({
-          type: "text",
-          text: timeInStatus.data
-            ? `Time in status:\n${renderTimeInStatus(timeInStatus.data)}`
-            : "Time in status: could not be loaded.",
-        });
-      }
-
-      // 6. Download images with smart size limiting
-      const limitedContent: ContentBlock[] = await downloadImages(allContentBlocks);
-
-      return {
-        content: limitedContent,
-      };
     }
   );
 
+}
+
+async function readTask(id: string, include_time_in_status?: boolean) {
+  // 0. The task itself first: when it cannot be loaded (rate limit, 404, ...) none of the
+  // follow-up requests (comments, time in status, time entries, space) are worth sending.
+  const task = await fetchTask(id);
+
+  // 1. Load base task content, comment events, and status change events in parallel
+  const [taskDetailContentBlocks, commentEvents, timeInStatus] = await Promise.all([
+    loadTaskContent(task), // Returns Promise<ContentBlock[]>
+    loadTaskComments(id), // Returns Promise<DatedContentEvent[]>
+    loadTimeInStatusHistory(id), // Returns events plus the raw response (one request serves both)
+  ]);
+  const statusChangeEvents = timeInStatus.events;
+
+  // 2. Combine comment and status change events
+  const allDatedEvents: DatedContentEvent[] = [...commentEvents, ...statusChangeEvents];
+
+  // 3. Sort all dated events chronologically
+  allDatedEvents.sort((a, b) => {
+    const dateA = a.date ? parseInt(a.date) : 0;
+    const dateB = b.date ? parseInt(b.date) : 0;
+    return dateA - dateB;
+  });
+
+  // 4. Flatten sorted events into a single ContentBlock stream
+  let processedEventBlocks: (ContentBlock | ImageMetadataBlock)[] = [];
+  for (const event of allDatedEvents) {
+    processedEventBlocks.push(...event.contentBlocks);
+  }
+
+  // 5. Combine task details with processed event blocks
+  const allContentBlocks: (ContentBlock | ImageMetadataBlock)[] = [...taskDetailContentBlocks, ...processedEventBlocks];
+
+  // The time-in-status response was already fetched for the status history above,
+  // so the optional section costs no extra request.
+  if (include_time_in_status) {
+    allContentBlocks.push({
+      type: "text",
+      text: timeInStatus.data
+        ? `Time in status:\n${renderTimeInStatus(timeInStatus.data)}`
+        : "Time in status: could not be loaded.",
+    });
+  }
+
+  // 6. Download images with smart size limiting
+  const limitedContent: ContentBlock[] = await downloadImages(allContentBlocks);
+
+  return {
+    content: limitedContent,
+  };
 }
 
 /**
@@ -173,7 +188,7 @@ async function fetchTimeInStatus(ids: string[]): Promise<Record<string, any>> {
     const chunk = ids.slice(i, i + 100);
     if (chunk.length === 1) {
       const id = chunk[0];
-      const response = await fetch(`https://api.clickup.com/api/v2/task/${id}/time_in_status`, {
+      const response = await clickupFetch(`https://api.clickup.com/api/v2/task/${id}/time_in_status`, {
         headers: { Authorization: CONFIG.authHeader },
       });
       if (!response.ok) {
@@ -185,7 +200,7 @@ async function fetchTimeInStatus(ids: string[]): Promise<Record<string, any>> {
     }
     const params = new URLSearchParams();
     chunk.forEach(id => params.append("task_ids", id));
-    const response = await fetch(`https://api.clickup.com/api/v2/task/bulk_time_in_status/task_ids?${params}`, {
+    const response = await clickupFetch(`https://api.clickup.com/api/v2/task/bulk_time_in_status/task_ids?${params}`, {
       headers: { Authorization: CONFIG.authHeader },
     });
     if (!response.ok) {
@@ -214,7 +229,7 @@ async function fetchTaskTimeEntries(taskId: string): Promise<any[]> {
       params.append('assignee', teamMembers.join(','));
     }
 
-    const response = await fetch(`https://api.clickup.com/api/v2/team/${CONFIG.teamId}/time_entries?${params}`, {
+    const response = await clickupFetch(`https://api.clickup.com/api/v2/team/${CONFIG.teamId}/time_entries?${params}`, {
       headers: { Authorization: CONFIG.authHeader },
     });
 
@@ -226,18 +241,33 @@ async function fetchTaskTimeEntries(taskId: string): Promise<any[]> {
     const data = await response.json();
     return data.data || [];
   } catch (error) {
+    if (error instanceof ClickUpRateLimitError) throw error;
     console.error('Error fetching task time entries:', error);
     return [];
   }
 }
 
-async function loadTaskContent(taskId: string): Promise<(ContentBlock | ImageMetadataBlock)[]> {
-  const response = await fetch(
+/** The task itself. Throws a readable error for a missing task or any non-ok response. */
+async function fetchTask(taskId: string): Promise<any> {
+  const response = await clickupFetch(
     `https://api.clickup.com/api/v2/task/${taskId}?include_markdown_description=true&include_subtasks=true`,
     { headers: { Authorization: CONFIG.authHeader } }
   );
-  const task = await response.json();
+  if (!response.ok) {
+    if (response.status === 404) {
+      throw new Error(`Task ${taskId} not found (404). Check the task id, and that this user can access the task.`);
+    }
+    const body = await response.text().catch(() => "");
+    throw new Error(`Error fetching task ${taskId}: ${response.status} ${response.statusText} ${body}`.trim());
+  }
+  const task: any = await response.json().catch(() => undefined);
+  if (!task || typeof task !== "object" || !task.id) {
+    throw new Error(`Error fetching task ${taskId}: ClickUp returned an unexpected response without a task.`);
+  }
+  return task;
+}
 
+async function loadTaskContent(task: any): Promise<(ContentBlock | ImageMetadataBlock)[]> {
   const [taskMetadata, content] = await Promise.all([
     // Create the task metadata block using the helper functions
     (async () => {
@@ -261,6 +291,7 @@ async function loadTaskComments(id: string): Promise<DatedContentEvent[]> {
     // all of them (the previous `?start_date=0` was silently ignored by ClickUp).
     comments = await fetchAllTopLevelComments(id);
   } catch (error) {
+    if (error instanceof ClickUpRateLimitError) throw error;
     console.error(`Error fetching comments for task ${id}:`, error);
     return [];
   }
@@ -317,7 +348,7 @@ async function loadTaskComments(id: string): Promise<DatedContentEvent[]> {
 async function loadTimeInStatusHistory(taskId: string): Promise<{ events: DatedContentEvent[]; data: any | null }> {
   const url = `https://api.clickup.com/api/v2/task/${taskId}/time_in_status`;
   try {
-    const response = await fetch(url, { headers: { Authorization: CONFIG.authHeader } });
+    const response = await clickupFetch(url, { headers: { Authorization: CONFIG.authHeader } });
     if (!response.ok) {
       console.error(`Error fetching time in status for task ${taskId}: ${response.status} ${response.statusText}`);
       return { events: [], data: null };
@@ -360,6 +391,7 @@ async function loadTimeInStatusHistory(taskId: string): Promise<{ events: DatedC
 
     return { events: uniqueEvents, data };
   } catch (error) {
+    if (error instanceof ClickUpRateLimitError) throw error;
     console.error(`Exception fetching time in status for task ${taskId}:`, error);
     return { events: [], data: null };
   }

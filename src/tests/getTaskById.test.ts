@@ -385,3 +385,88 @@ test('getTaskById appends a Time in status section when asked, reusing the same 
   assert.ok(text.indexOf('Time in status:') > text.indexOf("Status set to 'open'"));
   assert.equal(timeInStatusRequests, 1);
 });
+
+async function setupFailingTask(t: any, taskReply: (client: any) => void) {
+  t.mock.timers.enable();
+  process.env.CLICKUP_API_KEY = 'test-key';
+  process.env.CLICKUP_TEAM_ID = 'team1';
+
+  const { registerTaskToolsRead } = await import('../tools/task-tools');
+  const { __resetClickUpFetchState } = await import('../shared/clickup-fetch');
+  __resetClickUpFetchState();
+
+  const mockAgent = new MockAgent();
+  mockAgent.disableNetConnect();
+  setGlobalDispatcher(mockAgent);
+  const client = mockAgent.get('https://api.clickup.com');
+
+  taskReply(client);
+
+  // Follow-up requests that must NOT happen when the task itself cannot be loaded
+  const followUps: string[] = [];
+  const spy = (path: RegExp) =>
+    client.intercept({ path, method: 'GET' }).reply((opts: any) => {
+      followUps.push(String(opts.path));
+      return { statusCode: 200, data: JSON.stringify({ comments: [], data: [], status_history: [] }) };
+    }).persist();
+  spy(/\/api\/v2\/task\/task123\/comment.*/);
+  spy(/\/api\/v2\/task\/task123\/time_in_status/);
+  spy(/\/api\/v2\/team\/team1\/time_entries.*/);
+  spy(/\/api\/v2\/space\/.*/);
+
+  const tools: Record<string, any> = {};
+  registerTaskToolsRead({
+    tool: (name: string, _d: string, _s: any, _o: any, handler: any) => { tools[name] = handler; }
+  } as any, { user: { username: 'me', id: 'u1' } });
+
+  const cleanup = async () => {
+    await mockAgent.close();
+    t.mock.timers.reset();
+    __resetClickUpFetchState();
+  };
+  return { tools, followUps, cleanup };
+}
+
+test('getTaskById reports a 429 as a rate limit error and sends no follow-up requests', async (t) => {
+  const { tools, followUps, cleanup } = await setupFailingTask(t, (client) => {
+    client.intercept({ path: /\/api\/v2\/task\/task123\?.*/, method: 'GET' })
+      .reply(429, { err: 'Rate limit reached', ECODE: 'APP_002' }, {
+        headers: { 'retry-after': '37', 'x-ratelimit-limit': '100', 'x-ratelimit-remaining': '0' }
+      });
+  });
+
+  const result = await tools.getTaskById({ id: 'task123' });
+  assert.equal(result.isError, true);
+  const text = result.content[0].text;
+  assert.match(text, /rate limit reached/i);
+  assert.match(text, /Retry after 37s/);
+  assert.deepEqual(followUps, [], 'no comments / time in status / time entries / space requests');
+  await cleanup();
+});
+
+test('getTaskById reports a 404 as task not found and sends no follow-up requests', async (t) => {
+  const { tools, followUps, cleanup } = await setupFailingTask(t, (client) => {
+    client.intercept({ path: /\/api\/v2\/task\/task123\?.*/, method: 'GET' })
+      .reply(404, { err: 'Task not found', ECODE: 'ITEM_013' });
+  });
+
+  const result = await tools.getTaskById({ id: 'task123' });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /not found/i);
+  assert.match(result.content[0].text, /task123/);
+  assert.deepEqual(followUps, []);
+  await cleanup();
+});
+
+test('getTaskById reports any other non-ok task response as an error', async (t) => {
+  const { tools, followUps, cleanup } = await setupFailingTask(t, (client) => {
+    client.intercept({ path: /\/api\/v2\/task\/task123\?.*/, method: 'GET' })
+      .reply(401, { err: 'Oauth token invalid' });
+  });
+
+  const result = await tools.getTaskById({ id: 'task123' });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /401/);
+  assert.deepEqual(followUps, []);
+  await cleanup();
+});

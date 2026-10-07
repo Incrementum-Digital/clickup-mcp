@@ -1,3 +1,4 @@
+import { __resetClickUpFetchState } from "../shared/clickup-fetch";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { MockAgent, setGlobalDispatcher } from "undici";
@@ -234,6 +235,7 @@ test("updateTask rejects `description` together with `append_description` withou
 
 function updateTaskHarness(t: any) {
   t.mock.timers.enable();
+  __resetClickUpFetchState();
   process.env.CLICKUP_API_KEY = "test-key";
   process.env.CLICKUP_TEAM_ID = "team1";
   const mockAgent = new MockAgent();
@@ -251,6 +253,7 @@ function updateTaskHarness(t: any) {
     await mockAgent.close();
     t.mock.timers.runAll();
     t.mock.timers.reset();
+    __resetClickUpFetchState();
   };
   return { client, baseTask, cleanup };
 }
@@ -436,7 +439,7 @@ test("updateTask aborts without a PUT when the custom field definitions cannot b
     .reply(200, baseTask);
   client
     .intercept({ path: "/api/v2/list/list1/field", method: "GET" })
-    .reply(429, { err: "Rate limit reached" });
+    .reply(429, { err: "Rate limit reached" }, { headers: { "retry-after": "120" } });
   // No PUT interceptor: a write attempt would fail the request with a network error
   // and be visible in the message below.
 
@@ -444,7 +447,8 @@ test("updateTask aborts without a PUT when the custom field definitions cannot b
   const result = await updateTask({ task_id: "task123", name: "Renamed", custom_fields: { Tier: "Gold" } });
   const text = result.content[0].text;
   assert.match(text, /^Error updating task: /);
-  assert.match(text, /429/);
+  assert.match(text, /rate limit reached/i);
+  assert.match(text, /Retry after 120s/);
   assert.match(text, /The task was NOT updated/);
   await cleanup();
 });

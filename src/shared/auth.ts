@@ -1,3 +1,4 @@
+import { clickupFetch } from "./clickup-fetch";
 import * as http from "node:http";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
@@ -329,7 +330,7 @@ export async function runOAuthFlow(options: OAuthFlowOptions = {}): Promise<stri
 let credentialsPromise: Promise<{ token: string; teamId: string }> | null = null;
 
 async function detectTeamId(token: string): Promise<string> {
-  const response = await fetch(`${API_BASE}/team`, {
+  const response = await clickupFetch(`${API_BASE}/team`, {
     headers: { Authorization: formatAuthHeader(token) },
   });
   if (!response.ok) {

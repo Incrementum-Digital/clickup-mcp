@@ -1,3 +1,4 @@
+import { clickupFetch } from "./clickup-fetch";
 import { CONFIG } from "./config";
 import { credentialCacheKey } from "./request-context";
 import { resolveAssignees } from "./members";
@@ -62,7 +63,7 @@ export function getCustomFieldDefinitions(scope: CustomFieldScope): Promise<Cust
   }
 
   const fetchPromise = (async (): Promise<CustomFieldDefinition[]> => {
-    const response = await fetch(`https://api.clickup.com/api/v2/${kind}/${encodeURIComponent(id)}/field`, {
+    const response = await clickupFetch(`https://api.clickup.com/api/v2/${kind}/${encodeURIComponent(id)}/field`, {
       headers: { Authorization: CONFIG.authHeader },
     });
     if (!response.ok) {
@@ -428,8 +429,8 @@ export async function executeCustomFieldWrites(
       const url = `https://api.clickup.com/api/v2/task/${task_id}/field/${field.id}`;
       const response =
         body === null
-          ? await fetch(url, { method: "DELETE", headers: { Authorization: CONFIG.authHeader } })
-          : await fetch(url, {
+          ? await clickupFetch(url, { method: "DELETE", headers: { Authorization: CONFIG.authHeader } })
+          : await clickupFetch(url, {
               method: "POST",
               headers: { Authorization: CONFIG.authHeader, "Content-Type": "application/json" },
               body: JSON.stringify(body),

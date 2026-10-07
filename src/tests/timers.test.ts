@@ -1,10 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { MockAgent, setGlobalDispatcher } from "undici";
+import { __resetClickUpFetchState } from "../shared/clickup-fetch";
 
 const BASE = "/api/v2/team/team1/time_entries";
 
 async function setup() {
+  __resetClickUpFetchState();
   process.env.CLICKUP_API_KEY = "test-key";
   process.env.CLICKUP_TEAM_ID = "team1";
   const { registerTimeToolsRead, registerTimeToolsWrite } = await import("../tools/time-tools");
@@ -97,11 +99,18 @@ for (const status of [401, 429]) {
   test(`stopTimer reports ${status} on stop as an error`, async () => {
     const { tools, client, mockAgent } = await setup();
     client.intercept({ path: `${BASE}/current`, method: "GET" }).reply(200, RUNNING);
-    client.intercept({ path: `${BASE}/stop`, method: "POST" }).reply(status, { err: `clickup says ${status}` });
+    // A 429 with a long Retry-After makes the rate limit wrapper give up at once with its own message
+    client.intercept({ path: `${BASE}/stop`, method: "POST" })
+      .reply(status, { err: `clickup says ${status}` }, status === 429 ? { headers: { "retry-after": "120" } } : undefined);
     const result = await tools.stopTimer({});
     assert.equal(result.isError, true);
-    assert.ok(result.content[0].text.includes(String(status)));
-    assert.ok(result.content[0].text.includes(`clickup says ${status}`));
+    if (status === 429) {
+      assert.ok(/rate limit reached/i.test(result.content[0].text));
+    } else {
+      assert.ok(result.content[0].text.includes(String(status)));
+      assert.ok(result.content[0].text.includes(`clickup says ${status}`));
+    }
+    __resetClickUpFetchState();
     await mockAgent.close();
   });
 }

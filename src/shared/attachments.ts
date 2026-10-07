@@ -1,3 +1,4 @@
+import { clickupFetch } from "./clickup-fetch";
 import { Buffer } from "buffer";
 import { randomUUID } from "crypto";
 import { readFile } from "fs/promises";
@@ -246,7 +247,7 @@ export async function uploadTaskAttachment(
 ): Promise<ClickUpUploadedAttachment> {
   const { body, contentType } = buildMultipartBody(filename, bytes, mimeType);
 
-  const response = await fetch(`https://api.clickup.com/api/v2/task/${taskId}/attachment`, {
+  const response = await clickupFetch(`https://api.clickup.com/api/v2/task/${taskId}/attachment`, {
     method: "POST",
     headers: {
       Authorization: CONFIG.authHeader,

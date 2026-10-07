@@ -1,3 +1,4 @@
+import { clickupFetch } from "../shared/clickup-fetch";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { CONFIG } from "../shared/config";
@@ -23,7 +24,7 @@ export function registerListToolsRead(server: McpServer) {
     async ({ list_id }) => {
       try {
         // Get list details including statuses (try to get markdown content)
-        const listResponse = await fetch(`https://api.clickup.com/api/v2/list/${list_id}?include_markdown_description=true`, {
+        const listResponse = await clickupFetch(`https://api.clickup.com/api/v2/list/${list_id}?include_markdown_description=true`, {
           headers: { Authorization: CONFIG.authHeader },
         });
 
@@ -37,7 +38,7 @@ export function registerListToolsRead(server: McpServer) {
         let spaceTags: any[] = [];
         if (listData.space?.id) {
           try {
-            const spaceTagsResponse = await fetch(`https://api.clickup.com/api/v2/space/${listData.space.id}/tag`, {
+            const spaceTagsResponse = await clickupFetch(`https://api.clickup.com/api/v2/space/${listData.space.id}/tag`, {
               headers: { Authorization: CONFIG.authHeader },
             });
             if (spaceTagsResponse.ok) {
@@ -164,7 +165,7 @@ export function registerListToolsWrite(server: McpServer) {
 
         if (append_description !== undefined) {
           // Get current list info including description (try to get markdown content)
-          const listResponse = await fetch(`https://api.clickup.com/api/v2/list/${id}?include_markdown_description=true`, {
+          const listResponse = await clickupFetch(`https://api.clickup.com/api/v2/list/${id}?include_markdown_description=true`, {
             headers: { Authorization: CONFIG.authHeader },
           });
 
@@ -185,7 +186,7 @@ export function registerListToolsWrite(server: McpServer) {
           done.push("replaced the whole description");
         }
 
-        const updateResponse = await fetch(`https://api.clickup.com/api/v2/list/${id}`, {
+        const updateResponse = await clickupFetch(`https://api.clickup.com/api/v2/list/${id}`, {
           method: 'PUT',
           headers: {
             Authorization: CONFIG.authHeader,

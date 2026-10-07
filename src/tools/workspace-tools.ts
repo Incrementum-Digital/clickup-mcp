@@ -1,3 +1,4 @@
+import { clickupFetch } from "../shared/clickup-fetch";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { CONFIG } from "../shared/config";
@@ -22,7 +23,7 @@ export function registerWorkspaceTools(server: McpServer) {
         let lines: string[];
 
         if (list_id) {
-          const response = await fetch(`https://api.clickup.com/api/v2/list/${encodeURIComponent(list_id)}/member`, {
+          const response = await clickupFetch(`https://api.clickup.com/api/v2/list/${encodeURIComponent(list_id)}/member`, {
             headers: { Authorization: CONFIG.authHeader },
           });
           if (!response.ok) {

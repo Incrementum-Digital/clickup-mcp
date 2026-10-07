@@ -1,3 +1,4 @@
+import { clickupFetch } from "../shared/clickup-fetch";
 import {McpServer} from "@modelcontextprotocol/sdk/server/mcp.js";
 import {z} from "zod";
 import {CONFIG} from "../shared/config";
@@ -333,7 +334,7 @@ export function registerSearchTools(server: McpServer, userData: any) {
         console.error(`Attempting direct fetch for task IDs: ${taskIdsToFetchDirectly.join(', ')}`);
         const directFetchPromises = taskIdsToFetchDirectly.map(async (id) => {
           try {
-            const response = await fetch(
+            const response = await clickupFetch(
               `https://api.clickup.com/api/v2/task/${id}`,
               {headers: {Authorization: CONFIG.authHeader}}
             );

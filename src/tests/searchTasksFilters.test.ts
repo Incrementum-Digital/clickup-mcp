@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { MockAgent, setGlobalDispatcher } from "undici";
+import { __resetClickUpFetchState } from "../shared/clickup-fetch";
 
 const TASK_PATH = "/api/v2/team/team1/task?";
 
@@ -33,6 +34,7 @@ async function setup(
   respond: (path: string, page: number) => { body: any; status?: number },
 ) {
   t.mock.timers.enable();
+  __resetClickUpFetchState();
   process.env.CLICKUP_API_KEY = "test-key";
   process.env.CLICKUP_TEAM_ID = "team1";
   const { registerSearchTools } = await import("../tools/search-tools");
@@ -49,7 +51,7 @@ async function setup(
       requests.push(opts.path);
       const page = Number(/[?&]page=(\d+)/.exec(opts.path)?.[1] ?? "0");
       const { body, status } = respond(opts.path, page);
-      return { statusCode: status ?? 200, data: JSON.stringify(body), responseOptions: { headers: { "content-type": "application/json" } } };
+      return { statusCode: status ?? 200, data: JSON.stringify(body), responseOptions: { headers: { "content-type": "application/json", ...(status === 429 ? { "retry-after": "120" } : {}) } } };
     }) as any)
     .persist();
 
@@ -68,6 +70,7 @@ async function setup(
     done: async () => {
       await mockAgent.close();
       t.mock.timers.reset();
+      __resetClickUpFetchState();
     },
   };
 }
@@ -252,6 +255,7 @@ test("searchTasks warns when a later page fails", async (t) => {
   const result = await tools.searchTasks({ tags: ["partial"] });
   const text = textOf(result);
   assert.ok(text.includes("Fetching page 2 failed"));
+  assert.ok(text.includes("rate limit"));
   assert.ok(text.includes("Fetched 100 task(s) from 1 page(s)"));
   await done();
 });

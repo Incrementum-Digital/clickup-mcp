@@ -1,3 +1,4 @@
+import { clickupFetch } from "../shared/clickup-fetch";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { CONFIG } from "../shared/config";
@@ -12,7 +13,7 @@ function textResult(text: string, isError = false) {
 }
 
 async function sendJson(url: string, method: "POST" | "PUT", body: unknown, what: string): Promise<any> {
-  const response = await fetch(url, {
+  const response = await clickupFetch(url, {
     method,
     headers: { Authorization: CONFIG.authHeader, "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -45,7 +46,7 @@ export function registerHierarchyToolsRead(server: McpServer) {
     async ({ folder_id }) => {
       try {
         const id = assertSafeId(folder_id, "folder_id");
-        const response = await fetch(`${API}/folder/${id}`, {
+        const response = await clickupFetch(`${API}/folder/${id}`, {
           headers: { Authorization: CONFIG.authHeader },
         });
         if (!response.ok) {

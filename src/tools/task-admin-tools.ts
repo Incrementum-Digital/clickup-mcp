@@ -1,3 +1,4 @@
+import { clickupFetch } from "../shared/clickup-fetch";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { CONFIG } from "../shared/config";
@@ -30,7 +31,7 @@ interface TaskInfo {
 
 async function fetchTask(task_id: string): Promise<TaskInfo> {
   task_id = assertSafeId(task_id, "task_id");
-  const response = await fetch(`https://api.clickup.com/api/v2/task/${task_id}`, {
+  const response = await clickupFetch(`https://api.clickup.com/api/v2/task/${task_id}`, {
     headers: { Authorization: CONFIG.authHeader },
   });
   if (!response.ok) {
@@ -51,7 +52,7 @@ async function fetchTask(task_id: string): Promise<TaskInfo> {
 async function callListTask(method: "POST" | "DELETE", list_id: string, task_id: string): Promise<{ ok: boolean; error: string }> {
   list_id = assertSafeId(list_id, "list_id");
   task_id = assertSafeId(task_id, "task_id");
-  const response = await fetch(`https://api.clickup.com/api/v2/list/${list_id}/task/${task_id}`, {
+  const response = await clickupFetch(`https://api.clickup.com/api/v2/list/${list_id}/task/${task_id}`, {
     method,
     headers: { Authorization: CONFIG.authHeader },
   });
@@ -89,7 +90,7 @@ export function registerTaskAdminTools(server: McpServer) {
             true
           );
         }
-        const response = await fetch(`https://api.clickup.com/api/v2/task/${task_id}`, {
+        const response = await clickupFetch(`https://api.clickup.com/api/v2/task/${task_id}`, {
           method: "DELETE",
           headers: { Authorization: CONFIG.authHeader },
         });
@@ -128,7 +129,7 @@ export function registerTaskAdminTools(server: McpServer) {
           return text(`No change: ${label} is already in list ${task.listName} (list_id: ${task.listId}). ${generateTaskUrl(task.id)}`);
         }
 
-        const listResponse = await fetch(`https://api.clickup.com/api/v2/list/${list_id}`, {
+        const listResponse = await clickupFetch(`https://api.clickup.com/api/v2/list/${list_id}`, {
           headers: { Authorization: CONFIG.authHeader },
         });
         if (!listResponse.ok) {
@@ -157,7 +158,7 @@ export function registerTaskAdminTools(server: McpServer) {
           statusUsed = match.status;
         }
 
-        const response = await fetch(
+        const response = await clickupFetch(
           `https://api.clickup.com/api/v3/workspaces/${CONFIG.teamId}/tasks/${task_id}/home_list/${list_id}`,
           {
             method: "PUT",
@@ -279,7 +280,7 @@ export function registerTaskAdminTools(server: McpServer) {
           );
         }
 
-        const response = await fetch(`https://api.clickup.com/api/v2/comment/${comment_id}`, {
+        const response = await clickupFetch(`https://api.clickup.com/api/v2/comment/${comment_id}`, {
           method: "DELETE",
           headers: { Authorization: CONFIG.authHeader },
         });
@@ -328,7 +329,7 @@ export function registerTaskAdminTools(server: McpServer) {
           );
         }
 
-        const response = await fetch(`https://api.clickup.com/api/v2/task/${target_task_id}/merge`, {
+        const response = await clickupFetch(`https://api.clickup.com/api/v2/task/${target_task_id}/merge`, {
           method: "POST",
           headers: { Authorization: CONFIG.authHeader, "Content-Type": "application/json" },
           body: JSON.stringify({ source_task_ids: sourceIds }),

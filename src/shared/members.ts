@@ -1,3 +1,4 @@
+import { clickupFetch } from "./clickup-fetch";
 import { CONFIG } from "./config";
 import { credentialCacheKey } from "./request-context";
 
@@ -51,7 +52,7 @@ export function getWorkspaceMembers(): Promise<WorkspaceMember[]> {
   }
 
   const fetchPromise = (async (): Promise<WorkspaceMember[]> => {
-    const response = await fetch("https://api.clickup.com/api/v2/team", {
+    const response = await clickupFetch("https://api.clickup.com/api/v2/team", {
       headers: { Authorization: CONFIG.authHeader },
     });
     if (!response.ok) {

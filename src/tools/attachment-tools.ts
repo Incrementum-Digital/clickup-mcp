@@ -1,3 +1,4 @@
+import { clickupFetch } from "../shared/clickup-fetch";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { Buffer } from "buffer";
@@ -344,7 +345,7 @@ function describeAttachment(taskId: string, a: TaskAttachment, mime: string): st
 }
 
 async function fetchTaskAttachments(taskId: string): Promise<TaskAttachment[]> {
-  const response = await fetch(`https://api.clickup.com/api/v2/task/${taskId}`, {
+  const response = await clickupFetch(`https://api.clickup.com/api/v2/task/${taskId}`, {
     headers: { Authorization: CONFIG.authHeader },
   });
   if (!response.ok) {

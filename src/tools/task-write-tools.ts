@@ -1,3 +1,4 @@
+import { clickupFetch } from "../shared/clickup-fetch";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { CONFIG } from "../shared/config";
@@ -245,7 +246,7 @@ export function registerTaskToolsWrite(server: McpServer, userData: any) {
           ? `https://api.clickup.com/api/v2/comment/${parent_comment_id}/reply`
           : `https://api.clickup.com/api/v2/task/${task_id}/comment`;
 
-        const response = await fetch(url, {
+        const response = await clickupFetch(url, {
           method: 'POST',
           headers: {
             Authorization: CONFIG.authHeader,
@@ -349,7 +350,7 @@ export function registerTaskToolsWrite(server: McpServer, userData: any) {
 
         // Only `comment` is sent: sending `comment_text` alongside it appends that
         // string to the blocks instead of being ignored.
-        const response = await fetch(`https://api.clickup.com/api/v2/comment/${comment_id}`, {
+        const response = await clickupFetch(`https://api.clickup.com/api/v2/comment/${comment_id}`, {
           method: 'PUT',
           headers: {
             Authorization: CONFIG.authHeader,
@@ -473,7 +474,7 @@ export function registerTaskToolsWrite(server: McpServer, userData: any) {
         const assigneeIds = resolvedAssignees?.map((a) => a.id);
 
         // Get task details including current markdown description
-        const taskResponse = await fetch(`https://api.clickup.com/api/v2/task/${task_id}?include_markdown_description=true`, {
+        const taskResponse = await clickupFetch(`https://api.clickup.com/api/v2/task/${task_id}?include_markdown_description=true`, {
           headers: { Authorization: CONFIG.authHeader },
         });
 
@@ -544,7 +545,7 @@ export function registerTaskToolsWrite(server: McpServer, userData: any) {
           // Add new tags
           for (const tagName of tagsToAdd) {
             try {
-              const addTagResponse = await fetch(
+              const addTagResponse = await clickupFetch(
                 `https://api.clickup.com/api/v2/task/${task_id}/tag/${encodeURIComponent(tagName)}`,
                 {
                   method: 'POST',
@@ -564,7 +565,7 @@ export function registerTaskToolsWrite(server: McpServer, userData: any) {
           // Remove old tags
           for (const tagName of tagsToRemove) {
             try {
-              const removeTagResponse = await fetch(
+              const removeTagResponse = await clickupFetch(
                 `https://api.clickup.com/api/v2/task/${task_id}/tag/${encodeURIComponent(tagName)}`,
                 {
                   method: 'DELETE',
@@ -655,7 +656,7 @@ export function registerTaskToolsWrite(server: McpServer, userData: any) {
         // Update the task (if there are non-tag updates)
         let updatedTask = taskData;
         if (Object.keys(updateBody).length > 0) {
-          const updateResponse = await fetch(`https://api.clickup.com/api/v2/task/${task_id}`, {
+          const updateResponse = await clickupFetch(`https://api.clickup.com/api/v2/task/${task_id}`, {
             method: 'PUT',
             headers: {
               Authorization: CONFIG.authHeader,
@@ -684,7 +685,7 @@ export function registerTaskToolsWrite(server: McpServer, userData: any) {
 
         // If only tags, dependencies or custom fields were updated, fetch the task again to get the updated state
         if ((tagsChanged || customFieldCount > 0 || blocking !== undefined || waiting_on !== undefined || linked_tasks !== undefined) && Object.keys(updateBody).length === 0) {
-          const refreshResponse = await fetch(`https://api.clickup.com/api/v2/task/${task_id}`, {
+          const refreshResponse = await clickupFetch(`https://api.clickup.com/api/v2/task/${task_id}`, {
             headers: { Authorization: CONFIG.authHeader },
           });
           if (refreshResponse.ok) {
@@ -840,7 +841,7 @@ export function registerTaskToolsWrite(server: McpServer, userData: any) {
           requestBody.markdown_description = description;
         }
 
-        const response = await fetch(`https://api.clickup.com/api/v2/list/${list_id}/task`, {
+        const response = await clickupFetch(`https://api.clickup.com/api/v2/list/${list_id}/task`, {
           method: 'POST',
           headers: {
             Authorization: CONFIG.authHeader,
@@ -863,7 +864,7 @@ export function registerTaskToolsWrite(server: McpServer, userData: any) {
         if (tags !== undefined && tags.length > 0) {
           for (const tagName of tags) {
             try {
-              const addTagResponse = await fetch(
+              const addTagResponse = await clickupFetch(
                 `https://api.clickup.com/api/v2/task/${createdTask.id}/tag/${encodeURIComponent(tagName)}`,
                 {
                   method: 'POST',
@@ -899,7 +900,7 @@ export function registerTaskToolsWrite(server: McpServer, userData: any) {
         if (description && attachmentMap.size > 0) {
           const rewritten = rewriteMarkdownImageUrls(normalizedDescription, attachmentMap);
           if (rewritten !== description) {
-            const descriptionResponse = await fetch(`https://api.clickup.com/api/v2/task/${createdTask.id}`, {
+            const descriptionResponse = await clickupFetch(`https://api.clickup.com/api/v2/task/${createdTask.id}`, {
               method: 'PUT',
               headers: {
                 Authorization: CONFIG.authHeader,
@@ -928,7 +929,7 @@ export function registerTaskToolsWrite(server: McpServer, userData: any) {
           let createdFields = createdTask;
           if (!Array.isArray(createdTask.custom_fields)) {
             try {
-              const refreshed = await fetch(`https://api.clickup.com/api/v2/task/${createdTask.id}`, {
+              const refreshed = await clickupFetch(`https://api.clickup.com/api/v2/task/${createdTask.id}`, {
                 headers: { Authorization: CONFIG.authHeader },
               });
               if (refreshed.ok) {
@@ -993,7 +994,7 @@ function formatResolvedAssignees(resolved: Array<{ id: string; username?: string
 /** Add or remove a single tag; returns a warning text on failure, null on success. */
 async function changeTag(taskId: string, operation: 'add' | 'remove', tagName: string): Promise<string | null> {
   try {
-    const response = await fetch(
+    const response = await clickupFetch(
       `https://api.clickup.com/api/v2/task/${taskId}/tag/${encodeURIComponent(tagName)}`,
       {
         method: operation === 'add' ? 'POST' : 'DELETE',
@@ -1277,7 +1278,7 @@ async function updateTaskDependencies(
         }
       }
 
-      const response = await fetch(url, options);
+      const response = await clickupFetch(url, options);
       if (!response.ok) {
         const action = operation === 'add' ? 'add' : 'remove';
         const typeLabel = type === 'linked' ? 'link' : type.replace('_', ' ');
