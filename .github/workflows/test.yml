@@ -14,7 +14,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
 
-      - run: corepack enable  # honour packageManager (npm 11, min-release-age)
+      - run: corepack enable npm && npm -v  # honour packageManager (npm 11, min-release-age); bare `corepack enable` shims only pnpm and yarn
         with:
           node-version: '20'
           cache: 'npm'
@@ -35,7 +35,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
 
-      - run: corepack enable  # honour packageManager (npm 11, min-release-age)
+      - run: corepack enable npm && npm -v  # honour packageManager (npm 11, min-release-age); bare `corepack enable` shims only pnpm and yarn
         with:
           node-version: '20'
           cache: 'npm'
