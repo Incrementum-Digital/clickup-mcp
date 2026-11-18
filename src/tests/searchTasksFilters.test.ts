@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { MockAgent, setGlobalDispatcher } from "undici";
+import type { ZodRawShape } from "zod";
 import { __resetClickUpFetchState } from "../shared/clickup-fetch";
 
 const TASK_PATH = "/api/v2/team/team1/task?";
@@ -56,15 +57,18 @@ async function setup(
     .persist();
 
   const tools: Record<string, any> = {};
+  const toolMetadata: Record<string, { description: string; schema: ZodRawShape }> = {};
   const serverStub = {
-    tool: (name: string, _d: string, _s: any, _o: any, handler: any) => {
+    tool: (name: string, description: string, schema: ZodRawShape, _o: any, handler: any) => {
       tools[name] = handler;
+      toolMetadata[name] = { description, schema };
     },
   } as any;
   registerSearchTools(serverStub, { user: { username: "me", id: "u1" } });
 
   return {
     tools,
+    toolMetadata,
     requests,
     client,
     done: async () => {
@@ -196,14 +200,33 @@ test("searchTasks without terms returns the filtered tasks in API order", async 
 test("searchTasks rejects calls without terms or filters", async (t) => {
   const { tools, requests, done } = await setup(t, () => ({ body: { tasks: [] } }));
 
-  for (const args of [{}, { terms: [] }, { terms: ["  "] }, { include_closed: true, limit: 10, order_by: "created" }]) {
+  for (const args of [{}, { terms: [] }, { terms: ["  "] }, { limit: 1 }, { include_closed: true, limit: 10, order_by: "created" }]) {
     const result = await tools.searchTasks(args);
     assert.equal(result.isError, true);
     const text = textOf(result);
+    assert.match(text, /at least one nonblank search term or task filter/);
+    assert.match(text, /limit parameter only caps the results/);
     assert.ok(text.includes("Available filters:"));
     assert.ok(text.includes("assignees") && text.includes("custom_fields") && text.includes("due_date_from/to"));
   }
   assert.equal(requests.length, 0, "no API calls for a rejected search");
+  await done();
+});
+
+test("searchTasks documents and accepts the filtered example", async (t) => {
+  const { tools, toolMetadata, requests, done } = await setup(t, () => ({
+    body: { tasks: [makeTask("a1", "Alpha", { assignees: [{ id: "u1", username: "me" }] })] },
+  }));
+  const { description, schema } = toolMetadata.searchTasks;
+  assert.match(description, /at least one nonblank search term or task filter/);
+  assert.match(schema.terms.description ?? "", /when no task filter is set/);
+  assert.match(schema.limit.description ?? "", /requires a search term or task filter/);
+  assert.match(description, /\{"assigned_to_me": true, "limit": 1\}/);
+
+  const result = await tools.searchTasks({ assigned_to_me: true, limit: 1 });
+  assert.notEqual(result.isError, true);
+  assert.equal(requests.length, 1);
+  assert.match(textOf(result), /task_id: a1/);
   await done();
 });
 

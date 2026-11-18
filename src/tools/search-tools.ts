@@ -22,6 +22,8 @@ const FILTER_NAMES = [
   "list_ids", "space_ids", "folder_ids", "assignees", "assigned_to_me", "tags", "status", "only_todo",
   "due_date_from/to", "created_from/to", "updated_from/to", "done_from/to", "custom_fields", "parent_task_id",
 ].join(", ");
+const SEARCH_SCOPE_REQUIREMENT =
+  "Provide at least one nonblank search term or task filter. The limit parameter only caps the results.";
 
 function textResult(text: string, isError = false) {
   return {content: [{type: "text" as const, text}], ...(isError ? {isError: true} : {})};
@@ -32,7 +34,8 @@ export function registerSearchTools(server: McpServer, userData: any) {
   const searchTasksDescriptionBase = [
     "Searches tasks (sometimes called Tickets or Cards) across the whole workspace. Combine structured filters (assignees, tags, dates, custom fields, lists, spaces, folders, status, closed state) with optional fuzzy text matching on name, content, tags, assignees and ID (multiple search terms, OR logic).",
     "Structured filters are applied by ClickUp itself, so they find tasks regardless of how recently they were updated. Text terms are only matched against the tasks that pass the filters. When any of the structured filters (assignees, tags, folder_ids, dates, custom_fields, parent_task_id, include_closed, include_subtasks, order_by) is used, at most " + TASK_MAX_PAGES + " pages of " + TASK_PAGE_SIZE + " tasks are fetched per call - the response says when that cap was hit, in which case narrow the filters.",
-    "Provide search terms and/or at least one filter (list_ids, space_ids, folder_ids, assignees, assigned_to_me, tags, status, only_todo, a date range, custom_fields, parent_task_id). Use assigned_to_me to find the current user's tasks; assignees takes ClickUp user ids (use getMembers, if available, to look them up).",
+    `${SEARCH_SCOPE_REQUIREMENT} Available filters: ${FILTER_NAMES}.`,
+    'Example: {"assigned_to_me": true, "limit": 1}. The assignees filter takes ClickUp user IDs (use getMembers, if available, to look them up).',
     "Closed tasks and subtasks are excluded unless include_closed / include_subtasks is set. Without order_by results are ordered by last update.",
   ];
 
@@ -52,7 +55,7 @@ export function registerSearchTools(server: McpServer, userData: any) {
         .array(z.string())
         .optional()
         .describe(
-          "Array of search terms (OR logic). Can include task IDs. Optional - if not provided, returns most recent tasks."
+          "Search terms (OR logic), including task IDs. Provide at least one nonblank term when no task filter is set."
         ),
       list_ids: z
         .array(z.string())
@@ -130,7 +133,7 @@ export function registerSearchTools(server: McpServer, userData: any) {
         .min(1)
         .max(MAX_SEARCH_RESULTS)
         .optional()
-        .describe(`Maximum number of tasks to return (default ${DEFAULT_SEARCH_RESULTS}, max ${MAX_SEARCH_RESULTS})`),
+        .describe(`Maximum number of tasks to return (default ${DEFAULT_SEARCH_RESULTS}, max ${MAX_SEARCH_RESULTS}). Still requires a search term or task filter.`),
     },
     {
       readOnlyHint: true
@@ -178,7 +181,7 @@ export function registerSearchTools(server: McpServer, userData: any) {
 
       if (searchTerms.length === 0 && !hasStructuralFilter) {
         return textResult(
-          `Provide search terms and/or at least one filter. Available filters: ${FILTER_NAMES}.`,
+          `${SEARCH_SCOPE_REQUIREMENT} Available filters: ${FILTER_NAMES}.`,
           true
         );
       }
