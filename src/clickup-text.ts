@@ -28,7 +28,21 @@ export interface ClickUpTextItem {
     url: string;
     uploaded?: boolean;
   };
+  /** User mention payload on `type: "tag"` segments */
+  user?: {
+    id?: number | string;
+    username?: string;
+    email?: string;
+    [key: string]: any;
+  };
+  /** Emoji payload on `type: "emoticon"` segments; `code` is the hex code point(s) */
+  emoticon?: {
+    code?: string;
+    [key: string]: any;
+  };
   attributes?: any;
+  /** Typed segments (bookmark, attachment, embed, ...) carry their own payload key */
+  [key: string]: any;
 }
 
 /**
@@ -81,6 +95,183 @@ function toMarkdownImage(alt: string, url: string): string {
   return `![${safeAlt}](${safeUrl})`;
 }
 
+const HTTP_URL_PATTERN = /^https?:\/\//i;
+// Keys that hold a link target, in order of preference
+const SEGMENT_URL_KEYS = ['url', 'link', 'href', 'src', 'source'];
+// Keys that hold a human-readable name for a segment's payload
+const SEGMENT_LABEL_KEYS = ['title', 'name', 'filename'];
+const MAX_SEGMENT_SEARCH_DEPTH = 3;
+// Root-level keys the payload search does not look into
+const SEGMENT_SEARCH_SKIP = new Set(['attributes']);
+
+function asHttpUrl(value: unknown): string | undefined {
+  return typeof value === 'string' && HTTP_URL_PATTERN.test(value.trim()) ? value.trim() : undefined;
+}
+
+function nestedValues(value: object, skipKeys?: Set<string>): unknown[] {
+  if (Array.isArray(value)) {
+    return value;
+  }
+  return Object.entries(value)
+    .filter(([key]) => !skipKeys?.has(key))
+    .map(([, child]) => child);
+}
+
+/**
+ * Bounded search for an http(s) URL in a segment's payload. The first pass only
+ * looks at keys that are meant to hold a link; the second accepts any URL-shaped string.
+ */
+function findSegmentUrl(
+  value: unknown,
+  preferredOnly: boolean,
+  depth = 0,
+  skipKeys?: Set<string>
+): string | undefined {
+  if (depth > MAX_SEGMENT_SEARCH_DEPTH || value === null || typeof value !== 'object') {
+    return undefined;
+  }
+  if (!Array.isArray(value)) {
+    const record = value as Record<string, unknown>;
+    if (preferredOnly) {
+      for (const key of SEGMENT_URL_KEYS) {
+        const found = skipKeys?.has(key) ? undefined : asHttpUrl(record[key]);
+        if (found) return found;
+      }
+    } else {
+      for (const [key, child] of Object.entries(record)) {
+        const found = skipKeys?.has(key) ? undefined : asHttpUrl(child);
+        if (found) return found;
+      }
+    }
+  }
+  for (const child of nestedValues(value, skipKeys)) {
+    const found = findSegmentUrl(child, preferredOnly, depth + 1);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+function findSegmentLabel(value: unknown, depth = 0, skipKeys?: Set<string>): string | undefined {
+  if (depth > MAX_SEGMENT_SEARCH_DEPTH || value === null || typeof value !== 'object') {
+    return undefined;
+  }
+  if (!Array.isArray(value)) {
+    const record = value as Record<string, unknown>;
+    for (const key of SEGMENT_LABEL_KEYS) {
+      const candidate = record[key];
+      if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
+    }
+  }
+  for (const child of nestedValues(value, skipKeys)) {
+    const found = findSegmentLabel(child, depth + 1);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+/** `data-attachment` holds the attachment object as a JSON string; ignore it if unparseable */
+function parseDataAttachment(attributes: any): unknown {
+  const raw = attributes?.['data-attachment'];
+  if (raw && typeof raw === 'object') return raw;
+  if (typeof raw !== 'string') return undefined;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Render `[label](url)` inline, escaping what would break the syntax (same rules as images) */
+function toMarkdownLink(label: string, url: string): string {
+  const safeLabel = label.replace(/[\[\]\r\n]/g, ' ').trim() || url;
+  const encodedUrl = url.replace(/</g, '%3C').replace(/>/g, '%3E');
+  const safeUrl = /[\s()]/.test(encodedUrl) ? `<${encodedUrl}>` : encodedUrl;
+  return `[${safeLabel}](${safeUrl})`;
+}
+
+/** Emoji from a hex code point string such as "1f60a" or "1f468-200d-1f4bb" */
+function emoticonCodeToChar(code: unknown): string | undefined {
+  if (typeof code !== 'string' || !code.trim()) return undefined;
+  try {
+    const points = code.trim().split(/[-_\s]+/).map((hex) => {
+      if (!/^[0-9a-f]{1,6}$/i.test(hex)) throw new Error('not hex');
+      return parseInt(hex, 16);
+    });
+    return String.fromCodePoint(...points);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Render the typed segments the plain-text branch would otherwise flatten (user
+ * mentions) or mishandle (bookmarks, attachments, embeds: typed, carry a `text` label,
+ * and hide their link target in a payload). Returns the text to use in place of the
+ * segment's own, or null to leave the segment to the existing branches.
+ *
+ * `image`, `task_mention` and plain text segments are handled by their own branches.
+ */
+function renderTypedSegment(item: ClickUpTextItem): string | null {
+  const type = item.type;
+  if (type === 'image' || type === 'task_mention' || type === 'text') {
+    return null;
+  }
+
+  if (type === 'tag') {
+    // User mention. Carry the id so an agent can address the person, and so the
+    // writer can turn "@Name (user_id: N)" back into a real mention.
+    const userId = item.user?.id;
+    if (userId === undefined || userId === null || userId === '') {
+      return null;
+    }
+    const username = typeof item.user?.username === 'string' ? item.user.username.trim() : '';
+    const fromText = typeof item.text === 'string' ? item.text.replace(/^\s*@/, '').trim() : '';
+    const email = typeof item.user?.email === 'string' ? item.user.email.trim() : '';
+    const name = (username || fromText || email || 'unknown').replace(/\s+/g, ' ');
+    return `@${name} (user_id: ${userId})`;
+  }
+
+  if (type === 'emoticon') {
+    if (typeof item.text === 'string' && item.text) {
+      return null;
+    }
+    return emoticonCodeToChar(item.emoticon?.code) ?? null;
+  }
+
+  // Any other typed segment, or an untyped one without text: surface its link target
+  if (type === undefined && typeof item.text === 'string') {
+    return null;
+  }
+
+  const label = typeof item.text === 'string' ? item.text.trim() : '';
+  const attributeLink = item.attributes?.link;
+  if (typeof attributeLink === 'string' && attributeLink) {
+    // The text branch wraps this in the link; it only needs a label to wrap
+    if (label) {
+      return null;
+    }
+    const name = findSegmentLabel(item, 0, SEGMENT_SEARCH_SKIP) ?? attributeLink;
+    return name.replace(/[\[\]\r\n]/g, ' ').trim() || attributeLink;
+  }
+
+  const dataAttachment = parseDataAttachment(item.attributes);
+  const url =
+    findSegmentUrl(item, true, 0, SEGMENT_SEARCH_SKIP) ??
+    findSegmentUrl(item, false, 0, SEGMENT_SEARCH_SKIP) ??
+    findSegmentUrl(dataAttachment, true) ??
+    findSegmentUrl(dataAttachment, false);
+  if (!url) {
+    return null;
+  }
+
+  const resolvedLabel =
+    label ||
+    findSegmentLabel(item, 0, SEGMENT_SEARCH_SKIP) ||
+    findSegmentLabel(dataAttachment) ||
+    url;
+  return toMarkdownLink(resolvedLabel, url);
+}
+
 /**
  * Process an array of ClickUp text items into a structured content format
  * that includes both text and images in their original sequence
@@ -114,7 +305,14 @@ export async function convertClickUpTextItemsToToolCallResult(
   };
 
   for (let i = 0; i < textItems.length; i++) {
-    const item = textItems[i];
+    let item = textItems[i];
+
+    // Typed segments (mentions, bookmarks, attachments, embeds...) are rendered to text
+    // up front, then flow through the same inline formatting as plain text
+    const typedText = renderTypedSegment(item);
+    if (typedText !== null) {
+      item = { ...item, text: typedText, type: undefined };
+    }
 
     // Handle image items
     if (item.type === "image" && item.image && item.image.url) {
@@ -328,7 +526,7 @@ export async function convertClickUpTextItemsToToolCallResult(
     else if (item.type === "task_mention" && item.task_mention?.task_id) {
       currentLine += `https://app.clickup.com/t/${item.task_mention.task_id}`;
     }
-    // Handle other types of items like bookmarks or whatever clickup can think of
+    // Typed segments with neither text nor a link target: keep the raw shape rather than drop them
     else {
       currentTextBlock += JSON.stringify(item);
     }
@@ -560,6 +758,10 @@ export interface ClickUpCommentBlock {
    */
   task_mention?: {
     task_id: string;
+  };
+  /** Present on `type: "tag"` fragments: a user mention, rendered by ClickUp with the live name */
+  user?: {
+    id: number;
   };
   /**
    * Present on image fragments. ClickUp only renders a preview when this holds the
@@ -1006,6 +1208,39 @@ function serializeTableAsAlignedPipes(table: Table): string {
 }
 
 /**
+ * Matches the read rendering of a user mention: "@Brian Dao (user_id: 4219961)".
+ * The name may not contain '@', and the '@' may not follow a word character, so
+ * an e-mail address in front of a mention is not swallowed into its name.
+ */
+const USER_MENTION_PATTERN = /(?<![\w.])@([^@\r\n]{1,100}?) \(user_id: (\d+)\)/g;
+
+/**
+ * Push a text run, replacing every "@Name (user_id: N)" with a `tag` fragment.
+ * ClickUp renders the live user name, so the written name is dropped.
+ */
+function pushTextWithUserMentions(
+  blocks: ClickUpCommentBlock[],
+  value: string,
+  attributes: ClickUpCommentBlock['attributes']
+): void {
+  let lastIndex = 0;
+  for (const match of value.matchAll(USER_MENTION_PATTERN)) {
+    const userId = Number(match[2]);
+    if (!Number.isSafeInteger(userId)) {
+      continue;
+    }
+    if (match.index! > lastIndex) {
+      blocks.push({ text: value.slice(lastIndex, match.index), attributes });
+    }
+    blocks.push({ type: 'tag', user: { id: userId } });
+    lastIndex = match.index! + match[0].length;
+  }
+  if (lastIndex < value.length) {
+    blocks.push({ text: value.slice(lastIndex), attributes });
+  }
+}
+
+/**
  * Recursively walk phrasing content (inline nodes) and build ClickUp blocks
  * Accumulates formatting attributes from parent nodes
  */
@@ -1042,10 +1277,14 @@ function walkPhrasingContent(
       case 'text':
         // Plain text node
         if (node.value) {
-          blocks.push({
-            text: node.value,
-            attributes: Object.keys(currentAttrs).length > 0 ? currentAttrs : {}
-          });
+          const attrs = Object.keys(currentAttrs).length > 0 ? currentAttrs : {};
+          // "@Name (user_id: N)" is how reads render a user mention: turn it back
+          // into one. Not inside a link, where the text is a label.
+          if (currentAttrs.link) {
+            blocks.push({ text: node.value, attributes: attrs });
+          } else {
+            pushTextWithUserMentions(blocks, node.value, attrs);
+          }
         }
         break;
 
