@@ -381,15 +381,49 @@ function lineEndsInCodeBlock(textItems: ClickUpTextItem[], index: number): boole
 }
 
 /**
+ * Split every untyped text item that holds a newline plus other text into text pieces
+ * and single '\n' items, so each line break is its own item. ClickUp (Quill) lets one
+ * op carry several lines ("a\n\nb" bold, or "What we fixed\n\n"), and inline markers
+ * must never wrap a line break. Each piece inherits the item's attributes: block
+ * attributes on a newline op apply to every newline in it. Empty pieces are dropped
+ * (else "a\n\nb" in bold would emit an empty "****"). Typed segments (mentions,
+ * bookmarks, images, task mentions...) are left alone.
+ */
+function splitInlineNewlines(textItems: ClickUpTextItem[]): ClickUpTextItem[] {
+  const result: ClickUpTextItem[] = [];
+  for (const item of textItems) {
+    const splittable =
+      (item.type === undefined || item.type === 'text') &&
+      typeof item.text === 'string' &&
+      item.text !== '\n' &&
+      item.text.includes('\n');
+    if (!splittable) {
+      result.push(item);
+      continue;
+    }
+    const parts = item.text!.split(/\r?\n/);
+    parts.forEach((part, index) => {
+      if (part) result.push({ ...item, text: part });
+      if (index < parts.length - 1) result.push({ ...item, text: '\n' });
+    });
+  }
+  return result;
+}
+
+/**
  * Process an array of ClickUp text items into a structured content format
  * that includes both text and images in their original sequence
  *
- * @param textItems Array of text items from ClickUp API
+ * Inline markers (bold, italic, strike, code, link) are closed at the end of every line
+ * and reopened on the next, so a marker never wraps a line, paragraph or list boundary.
+ *
+ * @param rawTextItems Array of text items from ClickUp API
  * @returns Promise resolving to an array of content blocks (text and images)
  */
 export async function convertClickUpTextItemsToToolCallResult(
-  textItems: ClickUpTextItem[]
+  rawTextItems: ClickUpTextItem[]
 ): Promise<(CallToolResult["content"][number] | ImageMetadataBlock)[]> {
+  const textItems = splitInlineNewlines(rawTextItems);
   const contentBlocks: (CallToolResult["content"][number] | ImageMetadataBlock)[] = [];
   let currentTextBlock = "";
   let currentLine = ""; // Track current line separately for block formatting
@@ -410,6 +444,15 @@ export async function convertClickUpTextItemsToToolCallResult(
       inCodeBlock = false;
       currentFenceLang = '';
     }
+  };
+
+  // A line end closes every inline run (the lookahead below never lets one continue
+  // across a newline); reset so state can never leak into the next line.
+  const resetInlineState = () => {
+    activeBold = false;
+    activeItalic = false;
+    activeStrike = false;
+    activeCode = false;
   };
 
   for (let i = 0; i < textItems.length; i++) {
@@ -518,6 +561,7 @@ export async function convertClickUpTextItemsToToolCallResult(
           }
           currentTextBlock += currentLine + '\n';
           currentLine = "";
+          resetInlineState();
           continue;
         }
 
@@ -558,11 +602,24 @@ export async function convertClickUpTextItemsToToolCallResult(
         // Add formatted line to text block
         currentTextBlock += currentLine + '\n';
         currentLine = ""; // Reset for next line
+        resetInlineState();
         continue;
       }
 
       // Regular text with inline formatting
       let formattedText = item.text;
+
+      // A typed segment that fell through to plain text keeps its text on one line
+      // (it is never split above), so no marker can wrap a newline inside it
+      if (
+        typedText === null &&
+        item.type !== undefined &&
+        item.type !== 'text' &&
+        item.text !== '\n' &&
+        item.text.includes('\n')
+      ) {
+        formattedText = item.text.replace(/\s*\r?\n\s*/g, ' ');
+      }
 
       // Text that merely looks like a user mention must come back as literal text on a
       // write: escape its '@'. Not needed where the writer never converts (link labels,
@@ -582,18 +639,21 @@ export async function convertClickUpTextItemsToToolCallResult(
       const hasStrike = item.attributes?.strike === true;
       const hasLink = item.attributes?.link;
 
-      // Look ahead to next non-newline block
+      // Look ahead to the next item on the same line. A newline (with or without
+      // attributes) or an image (emitted on its own line) ends the line, so the
+      // run closes here and the next line reopens it.
       let nextHasBold = false;
       let nextHasItalic = false;
       let nextHasStrike = false;
       for (let j = i + 1; j < textItems.length; j++) {
         const nextItem = textItems[j];
-        if (nextItem.text !== '\n' || !nextItem.attributes) {
-          nextHasBold = nextItem.attributes?.bold === true;
-          nextHasItalic = nextItem.attributes?.italic === true;
-          nextHasStrike = nextItem.attributes?.strike === true;
+        if (nextItem.text === '\n' || nextItem.type === 'image') {
           break;
         }
+        nextHasBold = nextItem.attributes?.bold === true;
+        nextHasItalic = nextItem.attributes?.italic === true;
+        nextHasStrike = nextItem.attributes?.strike === true;
+        break;
       }
 
       // Build prefix (open new formatting)
@@ -637,6 +697,7 @@ export async function convertClickUpTextItemsToToolCallResult(
         closeCodeFence();
         currentTextBlock += currentLine + '\n';
         currentLine = "";
+        resetInlineState();
       } else {
         currentLine += formattedText;
       }
