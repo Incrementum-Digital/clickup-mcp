@@ -117,9 +117,18 @@ function nestedValues(value: object, skipKeys?: Set<string>): unknown[] {
     .map(([, child]) => child);
 }
 
+// Keys whose URLs are incidental (who the segment belongs to, a preview image), not
+// the link target. Only skipped when accepting "any URL-shaped string".
+const INCIDENTAL_URL_KEY = /avatar|profile|picture|thumbnail|icon/i;
+
+function isIncidentalUrlKey(key: string): boolean {
+  return key === 'user' || INCIDENTAL_URL_KEY.test(key);
+}
+
 /**
  * Bounded search for an http(s) URL in a segment's payload. The first pass only
- * looks at keys that are meant to hold a link; the second accepts any URL-shaped string.
+ * looks at keys that are meant to hold a link; the second accepts any URL-shaped
+ * string, except under the nested `user` object and avatar/profile/thumbnail-like keys.
  */
 function findSegmentUrl(
   value: unknown,
@@ -139,12 +148,15 @@ function findSegmentUrl(
       }
     } else {
       for (const [key, child] of Object.entries(record)) {
-        const found = skipKeys?.has(key) ? undefined : asHttpUrl(child);
+        if (skipKeys?.has(key) || isIncidentalUrlKey(key)) continue;
+        const found = asHttpUrl(child);
         if (found) return found;
       }
     }
   }
-  for (const child of nestedValues(value, skipKeys)) {
+  for (const [key, child] of Object.entries(value)) {
+    if (!Array.isArray(value) && skipKeys?.has(key)) continue;
+    if (!preferredOnly && isIncidentalUrlKey(key)) continue;
     const found = findSegmentUrl(child, preferredOnly, depth + 1);
     if (found) return found;
   }
@@ -203,6 +215,85 @@ function emoticonCodeToChar(code: unknown): string | undefined {
   }
 }
 
+const SUMMARY_SENSITIVE_KEY = /token|secret|key|password|auth|email/i;
+const SUMMARY_DATA_URI = /^\s*data:/i;
+const SUMMARY_MAX_FIELDS = 6;
+const SUMMARY_MAX_VALUE_LENGTH = 80;
+const SUMMARY_MAX_KEY_LENGTH = 40;
+const SUMMARY_MAX_LENGTH = 300;
+
+function summaryText(value: string, maxLength: number): string {
+  const flat = value.replace(/[\[\]\r\n]/g, ' ').trim();
+  return flat.length > maxLength ? flat.slice(0, maxLength) + '\u2026' : flat;
+}
+
+/**
+ * Bounded stand-in for a segment we cannot render: `[<type> segment: k1=v1, k2=v2 (+N fields omitted)]`.
+ * Only top-level and one-level-nested string/number/boolean fields are candidates.
+ * Fields named like a credential or an e-mail, and `data:` URIs, are never shown;
+ * values are cut to 80 characters, at most 6 fields are shown and the whole summary
+ * stays within 300 characters (fields are dropped from the end until it fits).
+ * Values are escaped like plain text so a mention-looking value cannot become a tag.
+ */
+function summarizeSegment(item: ClickUpTextItem): string {
+  const typeName =
+    (typeof item.type === 'string' && summaryText(item.type, SUMMARY_MAX_KEY_LENGTH)) || 'unknown';
+  const fields: string[] = [];
+  let omitted = 0;
+
+  const consider = (path: string, keys: string[], value: unknown) => {
+    if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'boolean') {
+      omitted++;
+      return;
+    }
+    const sensitive = keys.some((key) => SUMMARY_SENSITIVE_KEY.test(key));
+    if (sensitive || (typeof value === 'string' && SUMMARY_DATA_URI.test(value)) || fields.length >= SUMMARY_MAX_FIELDS) {
+      omitted++;
+      return;
+    }
+    fields.push(
+      `${summaryText(path, SUMMARY_MAX_KEY_LENGTH)}=${escapeUserMentionText(summaryText(String(value), SUMMARY_MAX_VALUE_LENGTH))}`
+    );
+  };
+
+  for (const [key, value] of Object.entries(item)) {
+    if (key === 'type' || key === 'text') continue;
+    if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+      for (const [childKey, child] of Object.entries(value)) {
+        consider(`${key}.${childKey}`, [key, childKey], child);
+      }
+    } else if (value !== null && value !== undefined) {
+      consider(key, [key], value);
+    }
+  }
+
+  const build = () =>
+    `[${typeName} segment` +
+    (fields.length ? `: ${fields.join(', ')}` : '') +
+    (omitted ? `${fields.length ? ' ' : ': '}(+${omitted} fields omitted)` : '') +
+    ']';
+  while (build().length > SUMMARY_MAX_LENGTH && fields.length > 0) {
+    fields.pop();
+    omitted++;
+  }
+  return build();
+}
+
+/**
+ * A mention name that always survives USER_MENTION_PATTERN: no '@', no embedded
+ * "(user_id:" that could be read as the id, one line, at most MAX_MENTION_NAME_LENGTH.
+ */
+function sanitizeMentionName(raw: string): string {
+  const name = raw
+    .replace(/@/g, '(at)')
+    .replace(/\(user_id:/gi, '[user_id:')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, MAX_MENTION_NAME_LENGTH)
+    .trim();
+  return name || 'unknown';
+}
+
 /**
  * Render the typed segments the plain-text branch would otherwise flatten (user
  * mentions) or mishandle (bookmarks, attachments, embeds: typed, carry a `text` label,
@@ -226,9 +317,8 @@ function renderTypedSegment(item: ClickUpTextItem): string | null {
     }
     const username = typeof item.user?.username === 'string' ? item.user.username.trim() : '';
     const fromText = typeof item.text === 'string' ? item.text.replace(/^\s*@/, '').trim() : '';
-    const email = typeof item.user?.email === 'string' ? item.user.email.trim() : '';
-    const name = (username || fromText || email || 'unknown').replace(/\s+/g, ' ');
-    return `@${name} (user_id: ${userId})`;
+    // No e-mail fallback: it would leak an address into the output
+    return `@${sanitizeMentionName(username || fromText)} (user_id: ${userId})`;
   }
 
   if (type === 'emoticon') {
@@ -257,10 +347,17 @@ function renderTypedSegment(item: ClickUpTextItem): string | null {
   const dataAttachment = parseDataAttachment(item.attributes);
   const url =
     findSegmentUrl(item, true, 0, SEGMENT_SEARCH_SKIP) ??
-    findSegmentUrl(item, false, 0, SEGMENT_SEARCH_SKIP) ??
     findSegmentUrl(dataAttachment, true) ??
+    findSegmentUrl(item, false, 0, SEGMENT_SEARCH_SKIP) ??
     findSegmentUrl(dataAttachment, false);
   if (!url) {
+    // Nothing to link to. Text keeps the segment visible; without any (missing or only
+    // whitespace; a bare newline is a line terminator, left to the text branch) render
+    // a summary instead of letting it vanish.
+    const hasText = typeof item.text === 'string';
+    if (!hasText || (item.text!.trim() === '' && !item.text!.includes('\n'))) {
+      return summarizeSegment(item);
+    }
     return null;
   }
 
@@ -270,6 +367,17 @@ function renderTypedSegment(item: ClickUpTextItem): string | null {
     findSegmentLabel(dataAttachment) ||
     url;
   return toMarkdownLink(resolvedLabel, url);
+}
+
+/** Whether the line this segment sits on is closed by a code-block newline */
+function lineEndsInCodeBlock(textItems: ClickUpTextItem[], index: number): boolean {
+  for (let j = index + 1; j < textItems.length; j++) {
+    const next = textItems[j];
+    if (next.text === '\n') {
+      return Boolean(next.attributes?.['code-block']);
+    }
+  }
+  return false;
 }
 
 /**
@@ -456,6 +564,18 @@ export async function convertClickUpTextItemsToToolCallResult(
       // Regular text with inline formatting
       let formattedText = item.text;
 
+      // Text that merely looks like a user mention must come back as literal text on a
+      // write: escape its '@'. Not needed where the writer never converts (link labels,
+      // inline code, code blocks), and never for our own rendered output (typedText).
+      if (
+        typedText === null &&
+        !item.attributes?.link &&
+        !item.attributes?.code &&
+        !lineEndsInCodeBlock(textItems, i)
+      ) {
+        formattedText = escapeUserMentionText(formattedText);
+      }
+
       // Determine current and next formatting state
       const hasBold = item.attributes?.bold === true;
       const hasItalic = item.attributes?.italic === true;
@@ -526,9 +646,10 @@ export async function convertClickUpTextItemsToToolCallResult(
     else if (item.type === "task_mention" && item.task_mention?.task_id) {
       currentLine += `https://app.clickup.com/t/${item.task_mention.task_id}`;
     }
-    // Typed segments with neither text nor a link target: keep the raw shape rather than drop them
+    // Segments with neither usable content nor a link target (an image without a url,
+    // an unknown typed segment without text): a bounded summary, in place on the line
     else {
-      currentTextBlock += JSON.stringify(item);
+      currentLine += summarizeSegment(item);
     }
   }
 
@@ -960,7 +1081,7 @@ export function convertMarkdownToClickUpBlocks(
       .parse(markdown) as Root;
 
     // Walk the tree recursively
-    walkMdastNodes(tree.children, {}, blocks, 0, attachmentsBySrc);
+    walkMdastNodes(tree.children, {}, blocks, 0, attachmentsBySrc, markdown);
 
   } catch (error) {
     console.error('Failed to parse markdown:', error);
@@ -983,7 +1104,8 @@ function walkMdastNodes(
   inheritedAttrs: ClickUpCommentBlock['attributes'],
   blocks: ClickUpCommentBlock[],
   depth: number = 0,
-  attachmentsBySrc?: Map<string, EmbeddableAttachment>
+  attachmentsBySrc?: Map<string, EmbeddableAttachment>,
+  source?: string
 ): void {
   for (let i = 0; i < nodes.length; i++) {
     const node = nodes[i];
@@ -1001,14 +1123,14 @@ function walkMdastNodes(
     switch (node.type) {
       case 'heading':
         // Process heading content with inline formatting
-        walkPhrasingContent((node as Heading).children, currentAttrs, blocks, attachmentsBySrc);
+        walkPhrasingContent((node as Heading).children, currentAttrs, blocks, attachmentsBySrc, source);
         // Add newline with header attribute
         blocks.push({ text: '\n', attributes: { header: (node as Heading).depth } });
         break;
 
       case 'paragraph':
         // Process paragraph content with inline formatting
-        walkPhrasingContent((node as Paragraph).children, currentAttrs, blocks, attachmentsBySrc);
+        walkPhrasingContent((node as Paragraph).children, currentAttrs, blocks, attachmentsBySrc, source);
         // Add newline unless it's the last node
         if (i < nodes.length - 1) {
           blocks.push({ text: '\n', attributes: {} });
@@ -1021,7 +1143,7 @@ function walkMdastNodes(
         const blockquoteChildren = (node as Blockquote).children;
         for (const child of blockquoteChildren) {
           if (child.type === 'paragraph') {
-            walkPhrasingContent((child as Paragraph).children, currentAttrs, blocks, attachmentsBySrc);
+            walkPhrasingContent((child as Paragraph).children, currentAttrs, blocks, attachmentsBySrc, source);
             blocks.push({ text: '\n', attributes: { blockquote: {} } });
           }
           // Note: Other child types (heading, list) are not supported by ClickUp blockquotes
@@ -1045,7 +1167,7 @@ function walkMdastNodes(
           for (const itemChild of listItem.children) {
             if (itemChild.type === 'paragraph') {
               // Process paragraph content with inline formatting
-              walkPhrasingContent((itemChild as Paragraph).children, currentAttrs, blocks, attachmentsBySrc);
+              walkPhrasingContent((itemChild as Paragraph).children, currentAttrs, blocks, attachmentsBySrc, source);
 
               // Add newline with list formatting and optional indent
               const listAttrs: ClickUpCommentBlock['attributes'] = {
@@ -1060,7 +1182,7 @@ function walkMdastNodes(
               blocks.push({ text: '\n', attributes: listAttrs });
             } else if (itemChild.type === 'list') {
               // Nested list - recursively process with increased depth
-              walkMdastNodes([itemChild], currentAttrs, blocks, depth + 1, attachmentsBySrc);
+              walkMdastNodes([itemChild], currentAttrs, blocks, depth + 1, attachmentsBySrc, source);
             }
           }
         }
@@ -1094,7 +1216,7 @@ function walkMdastNodes(
       default:
         // For any other block-level nodes, try to process children
         if ('children' in node && Array.isArray(node.children)) {
-          walkMdastNodes(node.children as Content[], currentAttrs, blocks, depth, attachmentsBySrc);
+          walkMdastNodes(node.children as Content[], currentAttrs, blocks, depth, attachmentsBySrc, source);
         } else if ('value' in node && typeof (node as any).value === 'string') {
           // Last-resort safety net: never drop text content silently
           blocks.push({ text: (node as any).value, attributes: {} });
@@ -1211,22 +1333,101 @@ function serializeTableAsAlignedPipes(table: Table): string {
  * Matches the read rendering of a user mention: "@Brian Dao (user_id: 4219961)".
  * The name may not contain '@', and the '@' may not follow a word character, so
  * an e-mail address in front of a mention is not swallowed into its name.
+ * The name is at most MAX_MENTION_NAME_LENGTH characters.
  */
-const USER_MENTION_PATTERN = /(?<![\w.])@([^@\r\n]{1,100}?) \(user_id: (\d+)\)/g;
+const MAX_MENTION_NAME_LENGTH = 100;
+const USER_MENTION_SOURCE = String.raw`(?<![\w.])@([^@\r\n]{1,${MAX_MENTION_NAME_LENGTH}}?) \(user_id: (\d+)\)`;
+const USER_MENTION_PATTERN = new RegExp(USER_MENTION_SOURCE, 'g');
+/** Same, with any run of backslashes in front of the '@' captured (group 1) */
+const ESCAPABLE_USER_MENTION_PATTERN = new RegExp(String.raw`(\\*)(${USER_MENTION_SOURCE})`, 'g');
+/** A mention whose '@' was escaped in the markdown source: `\@Name (user_id: N)` */
+const ESCAPED_USER_MENTION_IN_SOURCE = /\\@[^@\r\n]{1,100}? \(user_id: (\d+)\)/g;
+const MARKDOWN_ESCAPABLE = /[!-\/:-@\[-`{-~]/;
+
+/**
+ * Make text that merely looks like a mention literal: put `\@` in front of the '@' so
+ * the writer (which honours the escape) never turns it into a live tag. Backslashes
+ * already in front of the '@' are doubled so they cannot swallow the new escape.
+ */
+function escapeUserMentionText(text: string): string {
+  return text.replace(
+    ESCAPABLE_USER_MENTION_PATTERN,
+    (_all, backslashes: string, mention: string) => `${backslashes}${backslashes}\\${mention}`
+  );
+}
+
+/**
+ * Indexes (into `value`) of the '@' signs that the markdown source escaped (`\@`).
+ * remark strips the backslash from a text node's value, so the value alone cannot
+ * tell `\@Alice (user_id: 7)` (literal text) from `@Alice (user_id: 7)` (a mention).
+ *
+ * Simple case (the node's source slice differs from its value only by backslash
+ * escapes): walk both strings in lockstep, which maps every value index to its source
+ * character exactly. Complex case (entities, line prefixes such as `> ` or list
+ * indentation, anything the lockstep walk cannot explain): search the node's source
+ * slice for `\@<name> (user_id: N)` occurrences and treat the pattern matches with the
+ * same ids, in order, as escaped. This errs towards literal text, never a stray tag.
+ * Without position information nothing is treated as escaped (the previous behaviour).
+ */
+function findEscapedMentionSigns(node: Text, source: string | undefined): Set<number> {
+  const escaped = new Set<number>();
+  const start = node.position?.start.offset;
+  const end = node.position?.end.offset;
+  if (source === undefined || typeof start !== 'number' || typeof end !== 'number') {
+    return escaped;
+  }
+  const raw = source.slice(start, end);
+  const value = node.value;
+  if (raw === value || !raw.includes('\\')) {
+    return escaped;
+  }
+
+  // Simple case: lockstep walk
+  let j = 0;
+  let aligned = true;
+  for (let i = 0; i < value.length; i++) {
+    if (raw[j] === '\\' && j + 1 < raw.length && raw[j + 1] === value[i] && MARKDOWN_ESCAPABLE.test(value[i])) {
+      if (value[i] === '@') escaped.add(i);
+      j += 2;
+    } else if (raw[j] === value[i]) {
+      j += 1;
+    } else {
+      aligned = false;
+      break;
+    }
+  }
+  if (aligned && j === raw.length) {
+    return escaped;
+  }
+
+  // Complex case: match by id, in order
+  escaped.clear();
+  const escapedIds = Array.from(raw.matchAll(ESCAPED_USER_MENTION_IN_SOURCE), (m) => m[1]);
+  for (const match of value.matchAll(USER_MENTION_PATTERN)) {
+    const at = escapedIds.indexOf(match[2]);
+    if (at !== -1) {
+      escapedIds.splice(at, 1);
+      escaped.add(match.index!);
+    }
+  }
+  return escaped;
+}
 
 /**
  * Push a text run, replacing every "@Name (user_id: N)" with a `tag` fragment.
  * ClickUp renders the live user name, so the written name is dropped.
+ * Matches whose '@' is in `escapedSigns` stay literal text.
  */
 function pushTextWithUserMentions(
   blocks: ClickUpCommentBlock[],
   value: string,
-  attributes: ClickUpCommentBlock['attributes']
+  attributes: ClickUpCommentBlock['attributes'],
+  escapedSigns: ReadonlySet<number> = new Set()
 ): void {
   let lastIndex = 0;
   for (const match of value.matchAll(USER_MENTION_PATTERN)) {
     const userId = Number(match[2]);
-    if (!Number.isSafeInteger(userId)) {
+    if (!Number.isSafeInteger(userId) || escapedSigns.has(match.index!)) {
       continue;
     }
     if (match.index! > lastIndex) {
@@ -1248,7 +1449,8 @@ function walkPhrasingContent(
   nodes: PhrasingContent[],
   inheritedAttrs: ClickUpCommentBlock['attributes'],
   blocks: ClickUpCommentBlock[],
-  attachmentsBySrc?: Map<string, EmbeddableAttachment>
+  attachmentsBySrc?: Map<string, EmbeddableAttachment>,
+  source?: string
 ): void {
   for (const node of nodes) {
     const currentAttrs = { ...inheritedAttrs };
@@ -1279,11 +1481,12 @@ function walkPhrasingContent(
         if (node.value) {
           const attrs = Object.keys(currentAttrs).length > 0 ? currentAttrs : {};
           // "@Name (user_id: N)" is how reads render a user mention: turn it back
-          // into one. Not inside a link, where the text is a label.
+          // into one, unless its '@' was escaped (`\@`). Not inside a link, where the
+          // text is a label.
           if (currentAttrs.link) {
             blocks.push({ text: node.value, attributes: attrs });
           } else {
-            pushTextWithUserMentions(blocks, node.value, attrs);
+            pushTextWithUserMentions(blocks, node.value, attrs, findEscapedMentionSigns(node, source));
           }
         }
         break;
@@ -1291,19 +1494,19 @@ function walkPhrasingContent(
       case 'strong':
         // Bold text - recurse with bold attribute
         currentAttrs.bold = true;
-        walkPhrasingContent(node.children, currentAttrs, blocks, attachmentsBySrc);
+        walkPhrasingContent(node.children, currentAttrs, blocks, attachmentsBySrc, source);
         break;
 
       case 'emphasis':
         // Italic text - recurse with italic attribute
         currentAttrs.italic = true;
-        walkPhrasingContent(node.children, currentAttrs, blocks, attachmentsBySrc);
+        walkPhrasingContent(node.children, currentAttrs, blocks, attachmentsBySrc, source);
         break;
 
       case 'delete':
         // GFM strikethrough (~~text~~) - ClickUp renders this via the strike attribute
         currentAttrs.strike = true;
-        walkPhrasingContent(node.children, currentAttrs, blocks, attachmentsBySrc);
+        walkPhrasingContent(node.children, currentAttrs, blocks, attachmentsBySrc, source);
         break;
 
       case 'inlineCode':
@@ -1328,7 +1531,7 @@ function walkPhrasingContent(
         }
         // Ordinary link - recurse with link attribute
         currentAttrs.link = node.url;
-        walkPhrasingContent(node.children, currentAttrs, blocks, attachmentsBySrc);
+        walkPhrasingContent(node.children, currentAttrs, blocks, attachmentsBySrc, source);
         break;
       }
 
@@ -1346,7 +1549,7 @@ function walkPhrasingContent(
           });
         } else if ('children' in node && Array.isArray(node.children)) {
           // Recurse into children for other container nodes
-          walkPhrasingContent(node.children as PhrasingContent[], currentAttrs, blocks, attachmentsBySrc);
+          walkPhrasingContent(node.children as PhrasingContent[], currentAttrs, blocks, attachmentsBySrc, source);
         }
         break;
     }

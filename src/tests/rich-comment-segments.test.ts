@@ -143,9 +143,62 @@ test("a typed segment with text but no url keeps rendering its text", async () =
   assert.equal(await render([{ type: "widget", text: "just words", widget: { id: 1 } }]), "just words");
 });
 
-test("a typed segment with neither text nor url still falls back to JSON", async () => {
-  const segment = { type: "widget", widget: { id: 1 } };
-  assert.equal(await render([segment]), JSON.stringify(segment));
+test("a typed segment with neither text nor url renders a bounded summary", async () => {
+  assert.equal(
+    await render([{ type: "widget", widget: { id: 1 } }]),
+    "[widget segment: widget.id=1]"
+  );
+  assert.equal(await render([{ widget: { id: 1 } }]), "[unknown segment: widget.id=1]");
+});
+
+test("an unknown typed segment with empty text keeps its place on the line", async () => {
+  const text = await render([
+    { text: "A" },
+    { type: "widget", text: "", widget: { id: "w1" } },
+    { text: "B" },
+  ]);
+  assert.equal(text, "A[widget segment: widget.id=w1]B");
+  // Whitespace-only text is treated the same
+  assert.equal(
+    await render([{ text: "A" }, { type: "widget", text: "  ", widget: { id: "w1" } }, { text: "B" }]),
+    "A[widget segment: widget.id=w1]B"
+  );
+});
+
+test("the fallback summary is bounded and leaves out secrets, e-mails and data uris", async () => {
+  const huge = "x".repeat(5000);
+  const segment: ClickUpTextItem = {
+    type: "widget",
+    text: " ",
+    title: huge,
+    blob: "data:image/png;base64," + huge,
+    widget: {
+      id: "w1",
+      api_token: "tok-SECRET-1",
+      owner_email: "alice@example.com",
+      password: "hunter2",
+      note: huge,
+      f1: 1, f2: 2, f3: 3, f4: 4, f5: 5, f6: 6, f7: 7, f8: 8,
+      deeper: { hidden: "deep-value" },
+    },
+    extra: Array.from({ length: 50 }, (_, i) => i),
+  };
+  const text = await render([segment]);
+  assert.ok(text.length <= 300, `${text.length}: ${text}`);
+  assert.ok(text.startsWith("[widget segment: "), text);
+  assert.match(text, /\(\+\d+ fields omitted\)\]$/);
+  for (const leaked of ["SECRET", "alice@example.com", "hunter2", "data:image", "deep-value", "x".repeat(81)]) {
+    assert.ok(!text.includes(leaked), `${leaked} leaked: ${text}`);
+  }
+  // Values are cut to 80 characters
+  assert.ok(text.includes("title=" + "x".repeat(80) + "\u2026"), text);
+  // No more than 6 fields are shown
+  assert.ok(text.split("=").length - 1 <= 6, text);
+});
+
+test("a mention-looking value in the fallback summary cannot become a tag", async () => {
+  const text = await render([{ type: "widget", widget: { note: "@Alice (user_id: 7)" } }]);
+  assert.ok(!convertMarkdownToClickUpBlocks(text).some((b) => b.type === "tag"), text);
 });
 
 test("attributes.link on a typed segment is honoured, with a label when text is missing", async () => {
@@ -172,6 +225,61 @@ test("rendered links keep surrounding inline formatting and block formatting", a
     { text: "\n", attributes: { list: { list: "bullet" } } },
   ]);
   assert.equal(text, `- **[sheet](${SHEET_URL})**`);
+});
+
+test("an explicit data-attachment url wins over an incidental avatar url", async () => {
+  const text = await render([
+    {
+      type: "attachment",
+      text: "sheet.xlsx",
+      user: { profilePicture: "https://avatar.example.com/me.png" },
+      attributes: {
+        "data-attachment": JSON.stringify({ id: "a1", url: "https://files.example.com/sheet.xlsx" }),
+      },
+    },
+  ]);
+  assert.equal(text, "[sheet.xlsx](https://files.example.com/sheet.xlsx)");
+});
+
+test("the any-url pass skips the nested user object and avatar-like keys", async () => {
+  const text = await render([
+    {
+      type: "widget",
+      user: { homepage: "https://user.example.com/" },
+      meta: { avatarUrl: "https://avatar.example.com/a.png", landing: "https://real.example.com/page" },
+    },
+  ]);
+  assert.equal(text, "[https://real.example.com/page](https://real.example.com/page)");
+  // Only incidental urls: no link at all, so the segment falls back to its summary
+  const none = await render([
+    { type: "widget", user: { homepage: "https://user.example.com/" }, meta: { icon: "https://i.example.com/i.png" } },
+  ]);
+  assert.ok(none.startsWith("[widget segment: ") && !none.includes("]("), none);
+});
+
+test("an e-mail is never used as a mention name, and the name survives the writer", async () => {
+  const text = await render([
+    { type: "tag", user: { id: 7, email: "alice@example.com" } },
+  ]);
+  assert.equal(text, "@unknown (user_id: 7)");
+  assert.ok(!text.includes("alice@example.com"));
+  assert.deepEqual(convertMarkdownToClickUpBlocks(text), [{ type: "tag", user: { id: 7 } }]);
+});
+
+test("a mention name with '@', a fake id marker or excess length still round-trips to its own id", async () => {
+  for (const username of [
+    "alice@example.com",
+    "Bob (user_id: 1) x",
+    "n".repeat(500),
+    "line one\nline two",
+    "@@",
+  ]) {
+    const text = await render([{ type: "tag", user: { id: 7, username } }]);
+    const tags = convertMarkdownToClickUpBlocks(text).filter((b) => b.type === "tag");
+    assert.deepEqual(tags.map((b) => b.user), [{ id: 7 }], `${username} -> ${text}`);
+    assert.equal(text.split("(user_id:").length - 1, 1, text);
+    assert.ok(!text.includes("alice@example.com"), text);
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -225,6 +333,75 @@ test("two mentions and formatting in one paragraph", () => {
   const tags = blocks.filter((b) => b.type === "tag").map((b) => b.user!.id);
   assert.deepEqual(tags, [5, 6]);
   assert.ok(blocks.some((b) => b.text === " and " && b.attributes?.bold === true));
+});
+
+// ---------------------------------------------------------------------------
+// Literal text that looks like a mention must stay literal
+// ---------------------------------------------------------------------------
+
+function tagIds(blocks: { type?: string; user?: { id: number } }[]): number[] {
+  return blocks.filter((b) => b.type === "tag").map((b) => b.user!.id);
+}
+
+test("a backslash-escaped mention in markdown stays plain text", () => {
+  const blocks = convertMarkdownToClickUpBlocks("\\@Alice (user_id: 7)");
+  assert.deepEqual(blocks, [{ text: "@Alice (user_id: 7)", attributes: {} }]);
+
+  // Escaped and live mentions side by side, with another escape in the same text node
+  const mixed = convertMarkdownToClickUpBlocks("a \\* \\@Alice (user_id: 7) and @Bob (user_id: 8)");
+  assert.deepEqual(tagIds(mixed), [8]);
+  assert.equal(
+    mixed.map((b) => b.text ?? `<tag ${b.user!.id}>`).join(""),
+    "a * @Alice (user_id: 7) and <tag 8>"
+  );
+});
+
+test("escapes are honoured in the complex cases too (entities, blockquotes, lists)", () => {
+  assert.deepEqual(tagIds(convertMarkdownToClickUpBlocks("Tom &amp; \\@Alice (user_id: 7)")), []);
+  assert.deepEqual(tagIds(convertMarkdownToClickUpBlocks("> line\n> \\@Alice (user_id: 7)")), []);
+  assert.deepEqual(tagIds(convertMarkdownToClickUpBlocks("- item\n  \\@Alice (user_id: 7) more")), []);
+  // An escaped backslash does not escape the '@' after it
+  assert.deepEqual(tagIds(convertMarkdownToClickUpBlocks("\\\\@Alice (user_id: 7)")), [7]);
+});
+
+test("plain text that looks like a mention reads back escaped and writes back literal", async () => {
+  const read = await render([
+    { text: "@Alice (user_id: 7)" },
+    { text: " / " },
+    { type: "tag", text: "@Alice", user: { id: 7, username: "Alice" } },
+  ]);
+  assert.equal(read, "\\@Alice (user_id: 7) / @Alice (user_id: 7)");
+
+  assert.deepEqual(convertMarkdownToClickUpBlocks(read), [
+    { text: "@Alice (user_id: 7) / ", attributes: {} },
+    { type: "tag", user: { id: 7 } },
+  ]);
+});
+
+test("literal text segments (type text, preceding backslashes, bold) round-trip as literal", async () => {
+  for (const segment of [
+    { type: "text", text: "@Alice (user_id: 7)" },
+    { text: "\\@Alice (user_id: 7)" },
+    { text: "@Alice (user_id: 7)", attributes: { bold: true } },
+    { type: "widget", text: "@Alice (user_id: 7)" },
+  ] as ClickUpTextItem[]) {
+    const read = await render([segment]);
+    assert.deepEqual(tagIds(convertMarkdownToClickUpBlocks(read)), [], read);
+  }
+});
+
+test("mention-looking text in code is not escaped on read", async () => {
+  assert.equal(
+    await render([{ text: "@Alice (user_id: 7)", attributes: { code: true } }]),
+    "`@Alice (user_id: 7)`"
+  );
+  assert.equal(
+    await render([
+      { text: "@Alice (user_id: 7)" },
+      { text: "\n", attributes: { "code-block": "plain" } },
+    ]),
+    "```\n@Alice (user_id: 7)\n```"
+  );
 });
 
 // ---------------------------------------------------------------------------
